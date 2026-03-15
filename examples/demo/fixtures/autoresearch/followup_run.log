@@ -1,0 +1,12 @@
+Vocab size: 8,192
+Model config: {'n_layer': 8}
+---
+val_bpb:          0.995800
+training_seconds: 301.4
+total_seconds:    329.2
+peak_vram_mb:     45120.0
+mfu_percent:      40.60
+total_tokens_M:   503.1
+num_steps:        960
+num_params_M:     50.3
+depth:            8

@@ -82,6 +82,23 @@ The repo now contains the first concrete subsystem:
 
 ## Quick start
 
+## Demo
+
+Run the checked-in end-to-end demo:
+
+```bash
+python examples/demo/run_demo.py
+```
+
+That script exercises the real CLI against fixture data in
+[`examples/demo/fixtures`](/Users/speed/AIEQ-Core/examples/demo/fixtures) and
+writes JSON outputs into
+[`examples/demo/output`](/Users/speed/AIEQ-Core/examples/demo/output). The demo
+intentionally sets up a contested claim, imports two `autoresearch` branches,
+records the controller's `run_experiment` decision, closes it with a follow-up
+run import, and ends with a fresh controller decision. The detailed walkthrough
+is in [`examples/demo/README.md`](/Users/speed/AIEQ-Core/examples/demo/README.md).
+
 Create an empty ledger:
 
 ```bash

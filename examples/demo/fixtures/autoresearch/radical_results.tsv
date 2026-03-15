@@ -1,0 +1,4 @@
+commit	val_bpb	memory_gb	status	description
+r1	1.000500	44.0	keep	baseline
+r2	0.996800	44.5	keep	sparse grouped attention
+r3	0.997100	44.6	discard	add residual gate

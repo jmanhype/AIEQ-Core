@@ -1,0 +1,4 @@
+commit	val_bpb	memory_gb	status	description
+m1	1.000500	44.0	keep	baseline
+m2	1.000700	44.1	discard	widen feed-forward block
+m3	0.000000	0.0	crash	over-aggressive kernel fusion
