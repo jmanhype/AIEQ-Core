@@ -10,6 +10,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from aieq_core.ledger import EpistemicLedger
+from aieq_core.method_bridge import MethodBridgeDraft
 from aieq_core.orchestrator import CommandResult, ExternalCommand, ResearchOrchestrator
 from aieq_core.runtime import RuntimeConfig
 
@@ -18,6 +19,7 @@ def make_runtime_config(
     root: Path,
     *,
     google_key: bool = False,
+    openai_key: bool = False,
     remote_host: str = "",
     remote_repo: str = "",
 ) -> RuntimeConfig:
@@ -31,6 +33,8 @@ def make_runtime_config(
     env = {}
     if google_key:
         env["GOOGLE_API_KEY"] = "test-key"
+    if openai_key:
+        env["OPENAI_API_KEY"] = "test-openai-key"
 
     return RuntimeConfig(
         repo_root=root,
@@ -52,6 +56,9 @@ def make_runtime_config(
         denario_paper_llm="gemini-2.5-flash",
         denario_paper_journal="NONE",
         default_data_description_file="",
+        method_bridge_enabled=True,
+        method_bridge_model="gpt-4.1",
+        method_bridge_timeout_seconds=120,
     )
 
 
@@ -224,6 +231,105 @@ class ResearchOrchestratorTests(unittest.TestCase):
 
             snapshot = EpistemicLedger.load(ledger_path).claim_snapshot(claim.id)
             self.assertGreaterEqual(snapshot["metrics"]["evidence_count"], 2)
+
+    def test_run_next_applies_method_bridge_and_restores_train_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = make_runtime_config(root, openai_key=True)
+            ledger_path = root / "ledger.json"
+            ledger = EpistemicLedger.load(ledger_path)
+            claim = ledger.add_claim(
+                title="Bridge sparse attention into train.py",
+                statement="The generated method should become a concrete train.py mutation.",
+                novelty=0.9,
+                falsifiability=0.8,
+            )
+            method_path = root / "method.md"
+            method_path.write_text(
+                "Reduce attention heads early and ramp them up across training.\n",
+                encoding="utf-8",
+            )
+            ledger.add_artifact(
+                claim_id=claim.id,
+                kind="method",
+                title="Denario method",
+                content=method_path.read_text(encoding="utf-8"),
+                source_type="denario",
+                source_path=str(method_path),
+            )
+
+            home = root / "home"
+            (home / ".cache" / "autoresearch").mkdir(parents=True, exist_ok=True)
+            train_path = config.autoresearch_repo / "train.py"
+            original_train = "print('original train')\n"
+            bridged_train = "print('bridged train')\n"
+            train_path.write_text(original_train, encoding="utf-8")
+
+            def fake_runner(command: ExternalCommand) -> CommandResult:
+                self.assertEqual(train_path.read_text(encoding="utf-8"), bridged_train)
+                log_path = Path(command.stdout_path)
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.write_text(
+                    "\n".join(
+                        [
+                            "---",
+                            "val_bpb:          0.997900",
+                            "training_seconds: 300.1",
+                            "total_seconds:    325.9",
+                            "peak_vram_mb:     45060.2",
+                            "mfu_percent:      39.80",
+                            "total_tokens_M:   499.6",
+                            "num_steps:        953",
+                            "num_params_M:     50.3",
+                            "depth:            8",
+                        ]
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                return CommandResult(returncode=0)
+
+            def fake_which(binary: str) -> str | None:
+                mapping = {
+                    "git": "/usr/bin/git",
+                    "nvidia-smi": "/usr/bin/nvidia-smi",
+                }
+                return mapping.get(binary)
+
+            with patch("pathlib.Path.home", return_value=home), patch(
+                "aieq_core.runtime.shutil.which",
+                side_effect=fake_which,
+            ), patch.object(
+                ResearchOrchestrator,
+                "_build_method_bridge",
+                return_value=MethodBridgeDraft(
+                    model="gpt-4.1",
+                    prompt="bridge prompt",
+                    summary="Applied sparse-attention schedule.",
+                    train_py=bridged_train,
+                    response_id="resp_test",
+                    usage={"input_tokens": 10, "output_tokens": 20},
+                    raw_response={"id": "resp_test"},
+                ),
+            ):
+                orchestrator = ResearchOrchestrator(config=config, command_runner=fake_runner)
+                payload = orchestrator.run_next(ledger_path)
+
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["result"]["action"], "run_experiment")
+            self.assertEqual(train_path.read_text(encoding="utf-8"), original_train)
+            bridge = payload["result"]["bridge"]
+            self.assertTrue(bridge["applied"])
+            self.assertEqual(bridge["summary"], "Applied sparse-attention schedule.")
+            self.assertTrue(Path(bridge["generated_train_path"]).exists())
+            self.assertTrue(Path(bridge["original_train_path"]).exists())
+
+            snapshot = EpistemicLedger.load(ledger_path).claim_snapshot(claim.id)
+            execution = snapshot["executions"][-1]
+            self.assertEqual(
+                execution["metadata"]["bridge"]["summary"],
+                "Applied sparse-attention schedule.",
+            )
 
 
 if __name__ == "__main__":

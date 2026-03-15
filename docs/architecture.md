@@ -170,10 +170,19 @@ need to be the same host. The ledger, controller, and imports stay local, while
 the bounded GPU-heavy training step can execute remotely and stream its log back
 into the same control loop.
 
+It also now has a first semantic bridge between Denario and `autoresearch`:
+
+- if a claim has a Denario method artifact
+- the execution plane rewrites `train.py` through an OpenAI-backed bridge
+- applies that rewritten file only for the current `autoresearch` run
+- captures prompt/response/generated-file artifacts in the execution directory
+- then restores the worker's prior `train.py`
+
 It also introduces a capability-aware preflight layer:
 
 - repo launcher detection (`.venv` or `uv`)
 - provider-key checks against the configured Denario models
+- provider-key checks for the method bridge model
 - local or remote GPU and `autoresearch` cache checks
 - action-level readiness reporting through `doctor`
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import csv
 from dataclasses import dataclass
 import json
@@ -13,6 +14,7 @@ from .adapters.autoresearch import AutoresearchAdapter
 from .adapters.denario import DenarioAdapter
 from .controller import ResearchController
 from .ledger import EpistemicLedger
+from .method_bridge import MethodBridgeDraft, MethodBridgeError, OpenAIMethodBridge
 from .models import ActionProposal, ActionType, ExecutionStatus, serialize_dataclass
 from .runtime import RuntimeConfig, capability_key_for_action, doctor_report
 
@@ -411,20 +413,44 @@ class ResearchOrchestrator:
         execution_dir = self.config.execution_dir(decision_id)
         run_log = execution_dir / "autoresearch-run.log"
         remote_host = self.config.autoresearch_remote_host if self.config.use_remote_autoresearch() else ""
-        started = time.monotonic()
-        result = self.command_runner(
-            ExternalCommand(
-                args=self._autoresearch_command(),
-                cwd=self.config.repo_root if remote_host else self.config.autoresearch_repo,
-                env=self.config.subprocess_env(),
-                timeout_seconds=self.config.autoresearch_timeout_seconds,
-                capture_output=False,
-                stdout_path=str(run_log),
-                stderr_path=str(run_log),
-                combine_output=True,
+        bridge_metadata: dict[str, Any] | None = None
+        bridge_artifact_paths: list[str] = []
+        original_train_py = ""
+
+        method_artifact = self._latest_method_artifact_for_claim(ledger=ledger, claim_id=claim.id)
+        try:
+            if method_artifact is not None:
+                original_train_py = self._read_autoresearch_train_py()
+                bridge = self._build_method_bridge(
+                    claim=claim,
+                    method_artifact=method_artifact,
+                    current_train_py=original_train_py,
+                )
+                bridge_metadata, bridge_artifact_paths = self._persist_method_bridge_artifacts(
+                    execution_dir=execution_dir,
+                    method_artifact=method_artifact,
+                    original_train_py=original_train_py,
+                    bridge=bridge,
+                )
+                self._write_autoresearch_train_py(bridge.train_py)
+
+            started = time.monotonic()
+            result = self.command_runner(
+                ExternalCommand(
+                    args=self._autoresearch_command(),
+                    cwd=self.config.repo_root if remote_host else self.config.autoresearch_repo,
+                    env=self.config.subprocess_env(),
+                    timeout_seconds=self.config.autoresearch_timeout_seconds,
+                    capture_output=False,
+                    stdout_path=str(run_log),
+                    stderr_path=str(run_log),
+                    combine_output=True,
+                )
             )
-        )
-        runtime_seconds = round(time.monotonic() - started, 3)
+            runtime_seconds = round(time.monotonic() - started, 3)
+        finally:
+            if original_train_py:
+                self._write_autoresearch_train_py(original_train_py)
 
         commit = self._autoresearch_revision()
         description = f"{proposal.action_type.value} for {claim.title}"
@@ -443,16 +469,21 @@ class ResearchOrchestrator:
                 },
             )
             imported_run = serialize_dataclass(
-                AutoresearchAdapter.import_run(
+                self._annotate_autoresearch_import(
                     ledger=ledger,
-                    claim_id=claim.id,
-                    run_log_path=run_log,
-                    commit=commit,
-                    branch=branch,
-                    description=description,
-                    status="crash",
-                    decision_id=decision_id,
-                    execution_status=ExecutionStatus.FAILED,
+                    evidence=AutoresearchAdapter.import_run(
+                        ledger=ledger,
+                        claim_id=claim.id,
+                        run_log_path=run_log,
+                        commit=commit,
+                        branch=branch,
+                        description=description,
+                        status="crash",
+                        artifact_paths=bridge_artifact_paths,
+                        decision_id=decision_id,
+                        execution_status=ExecutionStatus.FAILED,
+                    ),
+                    bridge_metadata=bridge_metadata,
                 )
             )
             imported_series = AutoresearchAdapter.import_results_tsv(
@@ -476,6 +507,7 @@ class ResearchOrchestrator:
                 "host": remote_host,
                 "run_log_path": str(run_log),
                 "results_tsv_path": str(results_tsv_path),
+                "bridge": bridge_metadata,
                 "imported_run": imported_run,
                 "imported_series": imported_series,
                 "execution": execution,
@@ -497,17 +529,22 @@ class ResearchOrchestrator:
             },
         )
         imported_run = serialize_dataclass(
-            AutoresearchAdapter.import_run(
+            self._annotate_autoresearch_import(
                 ledger=ledger,
-                claim_id=claim.id,
-                run_log_path=run_log,
-                commit=commit,
-                branch=branch,
-                description=description,
-                status=status,
-                baseline_bpb=baseline_bpb,
-                decision_id=decision_id,
-                execution_status=ExecutionStatus.SUCCEEDED,
+                evidence=AutoresearchAdapter.import_run(
+                    ledger=ledger,
+                    claim_id=claim.id,
+                    run_log_path=run_log,
+                    commit=commit,
+                    branch=branch,
+                    description=description,
+                    status=status,
+                    baseline_bpb=baseline_bpb,
+                    artifact_paths=bridge_artifact_paths,
+                    decision_id=decision_id,
+                    execution_status=ExecutionStatus.SUCCEEDED,
+                ),
+                bridge_metadata=bridge_metadata,
             )
         )
         imported_series = AutoresearchAdapter.import_results_tsv(
@@ -534,6 +571,7 @@ class ResearchOrchestrator:
             "runtime_seconds": runtime_seconds,
             "run_log_path": str(run_log),
             "results_tsv_path": str(results_tsv_path),
+            "bridge": bridge_metadata,
             "imported_run": imported_run,
             "imported_series": imported_series,
             "execution": execution,
@@ -649,6 +687,170 @@ class ResearchOrchestrator:
         if not launcher.available:
             raise UnsupportedAutomatedActionError(launcher.detail)
         return [*launcher.command_prefix, "train.py"]
+
+    def _latest_method_artifact_for_claim(
+        self,
+        *,
+        ledger: EpistemicLedger,
+        claim_id: str,
+    ) -> Any | None:
+        method_artifacts = [
+            artifact
+            for artifact in ledger.artifacts_for_claim(claim_id)
+            if artifact.kind.value == "method"
+        ]
+        if not method_artifacts:
+            return None
+        return sorted(method_artifacts, key=lambda item: item.updated_at)[-1]
+
+    def _build_method_bridge(
+        self,
+        *,
+        claim: Any,
+        method_artifact: Any,
+        current_train_py: str,
+    ) -> MethodBridgeDraft:
+        if not self.config.method_bridge_enabled:
+            raise UnsupportedAutomatedActionError(
+                "Method bridge is disabled for run_experiment."
+            )
+
+        api_key = self.config.env.get("OPENAI_API_KEY", "").strip()
+        if not api_key:
+            raise UnsupportedAutomatedActionError(
+                "Method bridge requires OPENAI_API_KEY."
+            )
+
+        method_text = self._resolve_method_text(method_artifact)
+        bridge = OpenAIMethodBridge(
+            api_key=api_key,
+            model=self.config.method_bridge_model,
+            timeout_seconds=self.config.method_bridge_timeout_seconds,
+            base_url=self.config.env.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        )
+        try:
+            return bridge.generate(
+                claim_title=claim.title,
+                claim_statement=claim.statement,
+                method_text=method_text,
+                current_train_py=current_train_py,
+            )
+        except MethodBridgeError as exc:
+            raise UnsupportedAutomatedActionError(str(exc)) from exc
+
+    @staticmethod
+    def _resolve_method_text(method_artifact: Any) -> str:
+        source_path = str(method_artifact.source_path).strip()
+        if source_path:
+            path = Path(source_path)
+            if path.exists():
+                return path.read_text(encoding="utf-8").strip()
+        return str(method_artifact.content).strip()
+
+    def _persist_method_bridge_artifacts(
+        self,
+        *,
+        execution_dir: Path,
+        method_artifact: Any,
+        original_train_py: str,
+        bridge: MethodBridgeDraft,
+    ) -> tuple[dict[str, Any], list[str]]:
+        prompt_path = execution_dir / "train-bridge.prompt.txt"
+        response_path = execution_dir / "train-bridge.response.json"
+        original_path = execution_dir / "train-bridge.original.py"
+        bridged_path = execution_dir / "train-bridge.generated.py"
+
+        prompt_path.write_text(bridge.prompt, encoding="utf-8")
+        response_path.write_text(
+            json.dumps(bridge.raw_response, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        original_path.write_text(original_train_py, encoding="utf-8")
+        bridged_path.write_text(bridge.train_py, encoding="utf-8")
+
+        metadata = {
+            "applied": True,
+            "model": bridge.model,
+            "response_id": bridge.response_id,
+            "summary": bridge.summary,
+            "usage": bridge.usage,
+            "method_artifact_id": str(method_artifact.id),
+            "method_source_path": str(method_artifact.source_path),
+            "prompt_path": str(prompt_path),
+            "response_path": str(response_path),
+            "original_train_path": str(original_path),
+            "generated_train_path": str(bridged_path),
+        }
+        return metadata, [
+            str(prompt_path),
+            str(response_path),
+            str(original_path),
+            str(bridged_path),
+        ]
+
+    def _annotate_autoresearch_import(
+        self,
+        *,
+        ledger: EpistemicLedger,
+        evidence: Any,
+        bridge_metadata: dict[str, Any] | None,
+    ) -> Any:
+        if not bridge_metadata:
+            return evidence
+
+        evidence.metadata["bridge"] = dict(bridge_metadata)
+        execution_id = str(evidence.metadata.get("execution_id", "")).strip()
+        if execution_id and execution_id in ledger.executions:
+            ledger.executions[execution_id].metadata["bridge"] = dict(bridge_metadata)
+        ledger.save()
+        return evidence
+
+    def _read_autoresearch_train_py(self) -> str:
+        if self.config.use_remote_autoresearch():
+            remote_train = self._remote_autoresearch_train_path()
+            script = (
+                "import base64\n"
+                "from pathlib import Path\n"
+                f"data = Path({remote_train!r}).expanduser().read_bytes()\n"
+                "print(base64.b64encode(data).decode('ascii'))\n"
+            )
+            completed = self._run_remote_python(script)
+            encoded = completed.stdout.strip()
+            return base64.b64decode(encoded.encode("ascii")).decode("utf-8")
+
+        return (self.config.autoresearch_repo / "train.py").read_text(encoding="utf-8")
+
+    def _write_autoresearch_train_py(self, source: str) -> None:
+        if self.config.use_remote_autoresearch():
+            remote_train = self._remote_autoresearch_train_path()
+            encoded = base64.b64encode(source.encode("utf-8")).decode("ascii")
+            script = (
+                "import base64\n"
+                "from pathlib import Path\n"
+                f"path = Path({remote_train!r}).expanduser()\n"
+                f"path.write_bytes(base64.b64decode({encoded!r}))\n"
+            )
+            self._run_remote_python(script)
+            return
+
+        (self.config.autoresearch_repo / "train.py").write_text(source, encoding="utf-8")
+
+    def _run_remote_python(self, script: str) -> subprocess.CompletedProcess[str]:
+        heredoc = f"python3 - <<'PY'\n{script}\nPY"
+        completed = subprocess.run(
+            self.config.remote_ssh_command(f"bash -lc {shlex.quote(heredoc)}"),
+            cwd=self.config.repo_root,
+            env=self.config.subprocess_env(),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(completed.stderr.strip() or "Remote Python helper failed.")
+        return completed
+
+    def _remote_autoresearch_train_path(self) -> str:
+        return str(Path(self.config.autoresearch_remote_repo) / "train.py")
 
     def _autoresearch_revision(self) -> str:
         if self.config.use_remote_autoresearch():

@@ -171,6 +171,10 @@ That command will:
 For `autoresearch`, the runner also writes a branch-local `results.tsv` under
 `.aieq-runtime/` and re-imports that series so the controller sees aggregate
 momentum, crash rate, and stagnation after each automated run.
+If the target claim already has a Denario method artifact, `run-next` now uses
+an OpenAI-backed bridge to rewrite `train.py` for that single run, stores the
+prompt/response/generated file under `.aieq-runtime/executions/<decision-id>/`,
+and restores the worker's original `train.py` after execution.
 
 ### Remote `autoresearch`
 
@@ -180,6 +184,8 @@ local machine, set:
 ```bash
 AIEQ_AUTORESEARCH_REMOTE_HOST=3090
 AIEQ_AUTORESEARCH_REMOTE_REPO=/absolute/remote/path/to/autoresearch
+AIEQ_METHOD_BRIDGE_ENABLED=1
+AIEQ_METHOD_BRIDGE_MODEL=gpt-4.1
 ```
 
 After that, `doctor` will probe the remote worker instead of the local machine
@@ -349,7 +355,9 @@ branch history is imported, the controller uses the preferred branch for direct
 experiment hints while still considering cross-branch breadth and plateau
 signals.
 It also reads first-class Denario method and paper artifacts, so methodology and
-paper presence no longer depend on ad hoc claim metadata alone.
+paper presence no longer depend on ad hoc claim metadata alone. When a method
+artifact exists, the execution plane can now bridge that method into a concrete
+`train.py` rewrite before launching `autoresearch`.
 
 If you want the controller to only recommend without executing, keep using:
 

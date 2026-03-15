@@ -50,6 +50,9 @@ class RuntimeDoctorTests(unittest.TestCase):
                 denario_paper_llm="gemini-2.5-flash",
                 denario_paper_journal="NONE",
                 default_data_description_file=str(data_description),
+                method_bridge_enabled=True,
+                method_bridge_model="gpt-4.1",
+                method_bridge_timeout_seconds=120,
             )
 
             def fake_which(binary: str) -> str | None:
@@ -100,6 +103,9 @@ class RuntimeDoctorTests(unittest.TestCase):
                 denario_paper_llm="gemini-2.5-flash",
                 denario_paper_journal="NONE",
                 default_data_description_file="",
+                method_bridge_enabled=True,
+                method_bridge_model="gpt-4.1",
+                method_bridge_timeout_seconds=120,
             )
 
             remote_worker = RemoteAutoresearchWorker(

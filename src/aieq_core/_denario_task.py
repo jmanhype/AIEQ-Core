@@ -5,6 +5,21 @@ from pathlib import Path
 import sys
 
 
+def _patch_mistralai_compat() -> None:
+    """Backfill root-level mistralai exports expected by cmbagent/Denario."""
+    try:
+        import mistralai  # type: ignore
+        from mistralai.client import Mistral  # type: ignore
+        from mistralai.client.models import DocumentURLChunk  # type: ignore
+    except Exception:
+        return
+
+    if not hasattr(mistralai, "Mistral"):
+        mistralai.Mistral = Mistral
+    if not hasattr(mistralai, "DocumentURLChunk"):
+        mistralai.DocumentURLChunk = DocumentURLChunk
+
+
 def main(argv: list[str] | None = None) -> int:
     args = argv or sys.argv[1:]
     if len(args) != 1:
@@ -12,6 +27,8 @@ def main(argv: list[str] | None = None) -> int:
 
     spec_path = Path(args[0]).resolve()
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
+
+    _patch_mistralai_compat()
 
     from denario import Denario
     from denario.paper_agents.journal import Journal

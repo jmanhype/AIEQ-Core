@@ -48,6 +48,17 @@ def merge_env(defaults: dict[str, str], overrides: dict[str, str] | None = None)
     return merged
 
 
+def parse_bool(value: str, *, default: bool = False) -> bool:
+    normalized = value.strip().lower()
+    if not normalized:
+        return default
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def slugify(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     return slug or "claim"
@@ -141,6 +152,9 @@ class RuntimeConfig:
     denario_paper_llm: str
     denario_paper_journal: str
     default_data_description_file: str
+    method_bridge_enabled: bool
+    method_bridge_model: str
+    method_bridge_timeout_seconds: int
 
     @classmethod
     def load(cls, *, env_file: str | Path | None = None) -> "RuntimeConfig":
@@ -200,6 +214,15 @@ class RuntimeConfig:
             denario_paper_journal=env.get("AIEQ_DENARIO_PAPER_JOURNAL", "NONE").strip()
             or "NONE",
             default_data_description_file=env.get("AIEQ_DATA_DESCRIPTION_FILE", "").strip(),
+            method_bridge_enabled=parse_bool(
+                env.get("AIEQ_METHOD_BRIDGE_ENABLED", "1"),
+                default=True,
+            ),
+            method_bridge_model=env.get("AIEQ_METHOD_BRIDGE_MODEL", "gpt-4.1").strip()
+            or "gpt-4.1",
+            method_bridge_timeout_seconds=int(
+                env.get("AIEQ_METHOD_BRIDGE_TIMEOUT_SECONDS", "120")
+            ),
         )
 
     def subprocess_env(self) -> dict[str, str]:
@@ -464,6 +487,19 @@ def doctor_report(
         "GOOGLE_APPLICATION_CREDENTIALS": bool(config.env.get("GOOGLE_APPLICATION_CREDENTIALS")),
     }
 
+    method_bridge_provider = provider_for_model(config.method_bridge_model)
+    method_bridge_blockers: list[str] = []
+    if not config.method_bridge_enabled:
+        method_bridge_blockers.append("Method bridge is disabled.")
+    if method_bridge_provider != "openai":
+        method_bridge_blockers.append(
+            f"Only OpenAI-backed method bridging is implemented; got {config.method_bridge_model}."
+        )
+    if not key_presence["OPENAI_API_KEY"]:
+        method_bridge_blockers.append(
+            f"Missing OPENAI_API_KEY for bridge model {config.method_bridge_model}."
+        )
+
     def denario_capability(model_name: str, *, action: str) -> dict[str, Any]:
         blocked_by: list[str] = []
         provider = provider_for_model(model_name)
@@ -518,6 +554,13 @@ def doctor_report(
             "branch": config.default_autoresearch_branch,
             "mode": autoresearch_mode,
             "host": remote_autoresearch.host if remote_autoresearch is not None else "",
+            "bridge": {
+                "enabled": config.method_bridge_enabled,
+                "available": not method_bridge_blockers,
+                "blocked_by": method_bridge_blockers,
+                "model": config.method_bridge_model,
+                "provider": method_bridge_provider,
+            },
         },
         "manual_only": {
             "action": "manual_only",
