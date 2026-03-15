@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aieq-core"
+version = "0.1.0"
+description = "Epistemic ledger and control core for automated research agents"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "AIEQ-Core contributors" }
+]
+dependencies = []
+
+[project.scripts]
+aieq-core = "aieq_core.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
