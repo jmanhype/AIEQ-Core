@@ -123,6 +123,17 @@ It does this without collapsing the upstream repos into one monolith:
 - `autoresearch` still runs in its own repo and Python environment
 - AIEQ-Core remains the ledger, controller, and execution orchestrator
 
+`autoresearch` can also run on a remote SSH worker when the local machine is not
+the right place to do GPU work. The current remote path assumes a POSIX host
+with:
+
+- SSH access
+- `uv`
+- Python 3.10+
+- NVIDIA runtime
+- an `autoresearch` checkout on the remote host
+- `~/.cache/autoresearch` already prepared on that host
+
 Copy the runtime template and set the keys or paths you actually need:
 
 ```bash
@@ -160,6 +171,29 @@ That command will:
 For `autoresearch`, the runner also writes a branch-local `results.tsv` under
 `.aieq-runtime/` and re-imports that series so the controller sees aggregate
 momentum, crash rate, and stagnation after each automated run.
+
+### Remote `autoresearch`
+
+If you want the experiment runner to execute on a remote GPU box instead of the
+local machine, set:
+
+```bash
+AIEQ_AUTORESEARCH_REMOTE_HOST=3090
+AIEQ_AUTORESEARCH_REMOTE_REPO=/absolute/remote/path/to/autoresearch
+```
+
+After that, `doctor` will probe the remote worker instead of the local machine
+for:
+
+- SSH reachability
+- Python
+- `uv`
+- NVIDIA runtime
+- remote repo presence
+- remote `~/.cache/autoresearch`
+
+And `run-next` will execute `autoresearch` over SSH while still importing the
+run log and series rollup back into the local ledger.
 
 ## Quick start
 

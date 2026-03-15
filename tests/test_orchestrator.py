@@ -14,7 +14,13 @@ from aieq_core.orchestrator import CommandResult, ExternalCommand, ResearchOrche
 from aieq_core.runtime import RuntimeConfig
 
 
-def make_runtime_config(root: Path, *, google_key: bool = False) -> RuntimeConfig:
+def make_runtime_config(
+    root: Path,
+    *,
+    google_key: bool = False,
+    remote_host: str = "",
+    remote_repo: str = "",
+) -> RuntimeConfig:
     autoresearch_repo = root / "external" / "autoresearch"
     denario_repo = root / "external" / "denario"
     for repo in (autoresearch_repo, denario_repo):
@@ -35,6 +41,8 @@ def make_runtime_config(root: Path, *, google_key: bool = False) -> RuntimeConfi
         autoresearch_output_dir=root / ".aieq-runtime" / "autoresearch",
         autoresearch_repo=autoresearch_repo,
         denario_repo=denario_repo,
+        autoresearch_remote_host=remote_host,
+        autoresearch_remote_repo=remote_repo,
         default_autoresearch_branch="main",
         autoresearch_timeout_seconds=600,
         denario_timeout_seconds=1800,
@@ -154,6 +162,68 @@ class ResearchOrchestratorTests(unittest.TestCase):
                 snapshot["claim"]["metadata"]["autoresearch"]["branch"],
                 "main",
             )
+
+    def test_run_next_executes_autoresearch_over_ssh_when_remote_worker_is_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = make_runtime_config(
+                root,
+                remote_host="3090",
+                remote_repo="/home/straughter/autoresearch",
+            )
+            ledger_path = root / "ledger.json"
+            ledger = EpistemicLedger.load(ledger_path)
+            claim = ledger.add_claim(
+                title="Remote sparse attention experiment",
+                statement="A remote GPU worker should execute the next experiment.",
+                novelty=0.8,
+                falsifiability=0.9,
+            )
+
+            def fake_runner(command: ExternalCommand) -> CommandResult:
+                self.assertEqual(command.args[0], "ssh")
+                self.assertIn("3090", command.args)
+                log_path = Path(command.stdout_path)
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.write_text(
+                    "\n".join(
+                        [
+                            "---",
+                            "val_bpb:          0.997900",
+                            "training_seconds: 300.1",
+                            "total_seconds:    325.9",
+                            "peak_vram_mb:     45060.2",
+                            "mfu_percent:      39.80",
+                            "total_tokens_M:   499.6",
+                            "num_steps:        953",
+                            "num_params_M:     50.3",
+                            "depth:            8",
+                        ]
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                return CommandResult(returncode=0)
+
+            with patch.object(
+                ResearchOrchestrator,
+                "doctor",
+                return_value={"capabilities": {"run_experiment": {"available": True}}},
+            ), patch.object(
+                ResearchOrchestrator,
+                "_git_short_revision_remote",
+                return_value="remote123",
+            ):
+                orchestrator = ResearchOrchestrator(config=config, command_runner=fake_runner)
+                payload = orchestrator.run_next(ledger_path)
+
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["result"]["mode"], "remote")
+            self.assertEqual(payload["result"]["host"], "3090")
+            self.assertEqual(payload["result"]["commit"], "remote123")
+
+            snapshot = EpistemicLedger.load(ledger_path).claim_snapshot(claim.id)
+            self.assertGreaterEqual(snapshot["metrics"]["evidence_count"], 2)
 
 
 if __name__ == "__main__":

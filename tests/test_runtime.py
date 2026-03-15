@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from aieq_core.runtime import RuntimeConfig, doctor_report
+from aieq_core.runtime import RemoteAutoresearchWorker, RuntimeConfig, doctor_report
 
 
 class RuntimeDoctorTests(unittest.TestCase):
@@ -39,6 +39,8 @@ class RuntimeDoctorTests(unittest.TestCase):
                 autoresearch_output_dir=root / ".aieq-runtime" / "autoresearch",
                 autoresearch_repo=autoresearch_repo,
                 denario_repo=denario_repo,
+                autoresearch_remote_host="",
+                autoresearch_remote_repo="",
                 default_autoresearch_branch="main",
                 autoresearch_timeout_seconds=600,
                 denario_timeout_seconds=1800,
@@ -67,6 +69,68 @@ class RuntimeDoctorTests(unittest.TestCase):
             self.assertTrue(report["capabilities"]["generate_method"]["available"])
             self.assertTrue(report["capabilities"]["synthesize_paper"]["available"])
             self.assertTrue(report["capabilities"]["run_experiment"]["available"])
+
+    def test_doctor_prefers_remote_autoresearch_worker_when_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            autoresearch_repo = root / "external" / "autoresearch"
+            denario_repo = root / "external" / "denario"
+            for repo in (autoresearch_repo, denario_repo):
+                (repo / ".venv" / "bin").mkdir(parents=True, exist_ok=True)
+                (repo / ".venv" / "bin" / "python").write_text("", encoding="utf-8")
+            (autoresearch_repo / "train.py").write_text("print('train')\n", encoding="utf-8")
+
+            config = RuntimeConfig(
+                repo_root=root,
+                env_file=None,
+                env={"GOOGLE_API_KEY": "test-key"},
+                runtime_dir=root / ".aieq-runtime",
+                denario_projects_dir=root / ".aieq-runtime" / "denario",
+                autoresearch_output_dir=root / ".aieq-runtime" / "autoresearch",
+                autoresearch_repo=autoresearch_repo,
+                denario_repo=denario_repo,
+                autoresearch_remote_host="3090",
+                autoresearch_remote_repo="/home/straughter/autoresearch",
+                default_autoresearch_branch="main",
+                autoresearch_timeout_seconds=600,
+                denario_timeout_seconds=1800,
+                denario_mode="fast",
+                denario_idea_llm="gemini-2.0-flash",
+                denario_method_llm="gemini-2.0-flash",
+                denario_paper_llm="gemini-2.5-flash",
+                denario_paper_journal="NONE",
+                default_data_description_file="",
+            )
+
+            remote_worker = RemoteAutoresearchWorker(
+                enabled=True,
+                host="3090",
+                repo_path="/home/straughter/autoresearch",
+                ssh_path="/usr/bin/ssh",
+                reachable=True,
+                python_available=True,
+                uv_available=True,
+                gpu_available=True,
+                cache_available=True,
+                repo_available=True,
+                platform="Linux",
+                blocked_by=[],
+                detail="remote autoresearch worker",
+            )
+
+            with patch(
+                "aieq_core.runtime.probe_remote_autoresearch_worker",
+                return_value=remote_worker,
+            ):
+                report = doctor_report(config)
+
+            self.assertTrue(report["capabilities"]["run_experiment"]["available"])
+            self.assertEqual(report["capabilities"]["run_experiment"]["mode"], "remote")
+            self.assertEqual(report["capabilities"]["run_experiment"]["host"], "3090")
+            self.assertEqual(
+                report["repos"]["autoresearch"]["remote_worker"]["repo_path"],
+                "/home/straughter/autoresearch",
+            )
 
 
 if __name__ == "__main__":

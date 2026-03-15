@@ -160,11 +160,21 @@ The execution plane currently automates:
 - `autoresearch` `run_experiment`
 - `autoresearch` `reproduce_result`
 
+The `autoresearch` side can now target either:
+
+- the local machine
+- or a remote SSH worker, when configured
+
+That matters because the controller machine and the training machine do not
+need to be the same host. The ledger, controller, and imports stay local, while
+the bounded GPU-heavy training step can execute remotely and stream its log back
+into the same control loop.
+
 It also introduces a capability-aware preflight layer:
 
 - repo launcher detection (`.venv` or `uv`)
 - provider-key checks against the configured Denario models
-- GPU and `autoresearch` cache checks
+- local or remote GPU and `autoresearch` cache checks
 - action-level readiness reporting through `doctor`
 
 That shifts the UX from “read the controller hint and manually piece together

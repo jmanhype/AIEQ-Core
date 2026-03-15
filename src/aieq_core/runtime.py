@@ -4,7 +4,9 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
+import subprocess
 from typing import Any
 
 from .models import ActionType, serialize_dataclass
@@ -102,6 +104,23 @@ class ProjectLauncher:
 
 
 @dataclass(slots=True)
+class RemoteAutoresearchWorker:
+    enabled: bool
+    host: str
+    repo_path: str
+    ssh_path: str
+    reachable: bool
+    python_available: bool
+    uv_available: bool
+    gpu_available: bool
+    cache_available: bool
+    repo_available: bool
+    platform: str
+    blocked_by: list[str]
+    detail: str
+
+
+@dataclass(slots=True)
 class RuntimeConfig:
     repo_root: Path
     env_file: Path | None
@@ -111,6 +130,8 @@ class RuntimeConfig:
     autoresearch_output_dir: Path
     autoresearch_repo: Path
     denario_repo: Path
+    autoresearch_remote_host: str
+    autoresearch_remote_repo: str
     default_autoresearch_branch: str
     autoresearch_timeout_seconds: int
     denario_timeout_seconds: int
@@ -161,6 +182,11 @@ class RuntimeConfig:
             autoresearch_output_dir=autoresearch_output_dir,
             autoresearch_repo=autoresearch_repo,
             denario_repo=denario_repo,
+            autoresearch_remote_host=env.get("AIEQ_AUTORESEARCH_REMOTE_HOST", "").strip(),
+            autoresearch_remote_repo=env.get(
+                "AIEQ_AUTORESEARCH_REMOTE_REPO",
+                "",
+            ).strip(),
             default_autoresearch_branch=env.get("AIEQ_AUTORESEARCH_BRANCH", "main").strip() or "main",
             autoresearch_timeout_seconds=int(env.get("AIEQ_AUTORESEARCH_TIMEOUT_SECONDS", "600")),
             denario_timeout_seconds=int(env.get("AIEQ_DENARIO_TIMEOUT_SECONDS", "1800")),
@@ -182,6 +208,9 @@ class RuntimeConfig:
             env.setdefault(key, value)
         env["PYTHONUNBUFFERED"] = "1"
         return env
+
+    def use_remote_autoresearch(self) -> bool:
+        return bool(self.autoresearch_remote_host and self.autoresearch_remote_repo)
 
     def launcher_for_project(self, project_dir: str | Path) -> ProjectLauncher:
         project_path = Path(project_dir)
@@ -247,6 +276,168 @@ class RuntimeConfig:
             return None
         return resolve_path(self.default_data_description_file, root=self.repo_root)
 
+    def remote_ssh_base_args(self) -> list[str]:
+        if not self.use_remote_autoresearch():
+            return []
+        return [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=5",
+        ]
+
+    def remote_ssh_command(self, remote_command: str) -> list[str]:
+        if not self.use_remote_autoresearch():
+            return []
+        return [
+            *self.remote_ssh_base_args(),
+            self.autoresearch_remote_host,
+            remote_command,
+        ]
+
+    def remote_shell_path(self, value: str) -> str:
+        if value.startswith("~/"):
+            return "$HOME/" + shlex.quote(value[2:])
+        return shlex.quote(value)
+
+
+def probe_remote_autoresearch_worker(
+    config: RuntimeConfig,
+    *,
+    timeout_seconds: int = 5,
+) -> RemoteAutoresearchWorker | None:
+    if not config.use_remote_autoresearch():
+        return None
+
+    ssh_path = shutil.which("ssh") or ""
+    blocked_by: list[str] = []
+    if not ssh_path:
+        blocked_by.append("Local `ssh` binary is not available.")
+        return RemoteAutoresearchWorker(
+            enabled=True,
+            host=config.autoresearch_remote_host,
+            repo_path=config.autoresearch_remote_repo,
+            ssh_path="",
+            reachable=False,
+            python_available=False,
+            uv_available=False,
+            gpu_available=False,
+            cache_available=False,
+            repo_available=False,
+            platform="",
+            blocked_by=blocked_by,
+            detail="ssh unavailable",
+        )
+
+    remote_repo = config.remote_shell_path(config.autoresearch_remote_repo)
+    probe_script = f"""
+set -e
+if command -v python3 >/dev/null 2>&1; then
+  echo PYTHON_OK
+else
+  echo PYTHON_MISSING
+fi
+if command -v uv >/dev/null 2>&1; then
+  echo UV_OK
+else
+  echo UV_MISSING
+fi
+if command -v nvidia-smi >/dev/null 2>&1; then
+  echo GPU_OK
+else
+  echo GPU_MISSING
+fi
+if [ -d ~/.cache/autoresearch ]; then
+  echo CACHE_OK
+else
+  echo CACHE_MISSING
+fi
+if [ -d {remote_repo} ]; then
+  echo REPO_OK
+else
+  echo REPO_MISSING
+fi
+uname -s 2>/dev/null || echo PLATFORM_UNKNOWN
+"""
+
+    try:
+        completed = subprocess.run(
+            config.remote_ssh_command(f"bash -lc {shlex.quote(probe_script)}"),
+            cwd=config.repo_root,
+            env=config.subprocess_env(),
+            timeout=timeout_seconds,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        blocked_by.append(f"Remote worker probe failed: {exc}")
+        return RemoteAutoresearchWorker(
+            enabled=True,
+            host=config.autoresearch_remote_host,
+            repo_path=config.autoresearch_remote_repo,
+            ssh_path=ssh_path,
+            reachable=False,
+            python_available=False,
+            uv_available=False,
+            gpu_available=False,
+            cache_available=False,
+            repo_available=False,
+            platform="",
+            blocked_by=blocked_by,
+            detail="probe failed",
+        )
+
+    stdout = completed.stdout
+    reachable = completed.returncode == 0
+    python_available = "PYTHON_OK" in stdout
+    uv_available = "UV_OK" in stdout
+    gpu_available = "GPU_OK" in stdout
+    cache_available = "CACHE_OK" in stdout
+    repo_available = "REPO_OK" in stdout
+    platform = ""
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if stripped in {"Linux", "Darwin"}:
+            platform = stripped
+        elif stripped and not stripped.endswith(("_OK", "_MISSING")) and stripped not in {"PLATFORM_UNKNOWN"}:
+            if stripped in {"Linux", "Darwin"} or stripped.startswith(("MINGW", "MSYS", "CYGWIN")):
+                platform = stripped
+
+    if not reachable:
+        blocked_by.append(
+            completed.stderr.strip() or f"SSH probe exited with code {completed.returncode}."
+        )
+    if not python_available:
+        blocked_by.append("Remote worker is missing Python.")
+    if not uv_available:
+        blocked_by.append("Remote worker is missing uv.")
+    if not gpu_available:
+        blocked_by.append("Remote worker has no NVIDIA runtime.")
+    if not cache_available:
+        blocked_by.append("Remote worker is missing ~/.cache/autoresearch.")
+    if not repo_available:
+        blocked_by.append(
+            f"Remote worker is missing repo path {config.autoresearch_remote_repo}."
+        )
+
+    return RemoteAutoresearchWorker(
+        enabled=True,
+        host=config.autoresearch_remote_host,
+        repo_path=config.autoresearch_remote_repo,
+        ssh_path=ssh_path,
+        reachable=reachable,
+        python_available=python_available,
+        uv_available=uv_available,
+        gpu_available=gpu_available,
+        cache_available=cache_available,
+        repo_available=repo_available,
+        platform=platform,
+        blocked_by=blocked_by,
+        detail="remote autoresearch worker",
+    )
+
 
 def doctor_report(
     config: RuntimeConfig,
@@ -262,6 +453,7 @@ def doctor_report(
     denario_launcher = config.launcher_for_project(config.denario_repo)
     default_data_description = config.default_data_description_path()
     autoresearch_cache_dir = Path.home() / ".cache" / "autoresearch"
+    remote_autoresearch = probe_remote_autoresearch_worker(config)
 
     key_presence = {
         "OPENAI_API_KEY": bool(config.env.get("OPENAI_API_KEY")),
@@ -292,14 +484,18 @@ def doctor_report(
         }
 
     autoresearch_blockers: list[str] = []
-    if not autoresearch_launcher.available:
-        autoresearch_blockers.append(autoresearch_launcher.detail)
-    if not nvidia_path:
-        autoresearch_blockers.append("No NVIDIA runtime detected (`nvidia-smi` not found).")
-    if not autoresearch_cache_dir.exists():
-        autoresearch_blockers.append(
-            f"Missing autoresearch cache at {autoresearch_cache_dir}. Run prepare.py first."
-        )
+    autoresearch_mode = "remote" if remote_autoresearch is not None else "local"
+    if remote_autoresearch is not None:
+        autoresearch_blockers.extend(remote_autoresearch.blocked_by)
+    else:
+        if not autoresearch_launcher.available:
+            autoresearch_blockers.append(autoresearch_launcher.detail)
+        if not nvidia_path:
+            autoresearch_blockers.append("No NVIDIA runtime detected (`nvidia-smi` not found).")
+        if not autoresearch_cache_dir.exists():
+            autoresearch_blockers.append(
+                f"Missing autoresearch cache at {autoresearch_cache_dir}. Run prepare.py first."
+            )
 
     capabilities = {
         "generate_idea": {
@@ -320,6 +516,8 @@ def doctor_report(
             "available": not autoresearch_blockers,
             "blocked_by": autoresearch_blockers,
             "branch": config.default_autoresearch_branch,
+            "mode": autoresearch_mode,
+            "host": remote_autoresearch.host if remote_autoresearch is not None else "",
         },
         "manual_only": {
             "action": "manual_only",
@@ -351,6 +549,8 @@ def doctor_report(
             "denario_paper_llm": config.denario_paper_llm,
             "denario_paper_journal": config.denario_paper_journal,
             "default_autoresearch_branch": config.default_autoresearch_branch,
+            "autoresearch_remote_host": config.autoresearch_remote_host,
+            "autoresearch_remote_repo": config.autoresearch_remote_repo,
         },
         "tools": {
             "uv": {"available": bool(uv_path), "path": uv_path},
@@ -364,6 +564,12 @@ def doctor_report(
                 "train_py": str(config.autoresearch_repo / "train.py"),
                 "launcher": serialize_dataclass(autoresearch_launcher),
                 "data_cache_exists": autoresearch_cache_dir.exists(),
+                "mode": autoresearch_mode,
+                "remote_worker": (
+                    serialize_dataclass(remote_autoresearch)
+                    if remote_autoresearch is not None
+                    else None
+                ),
             },
             "denario": {
                 "path": str(config.denario_repo),

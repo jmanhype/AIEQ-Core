@@ -4,6 +4,7 @@ import csv
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import shlex
 import subprocess
 import time
 from typing import Any, Callable
@@ -409,11 +410,12 @@ class ResearchOrchestrator:
         branch = self._resolve_autoresearch_branch(claim)
         execution_dir = self.config.execution_dir(decision_id)
         run_log = execution_dir / "autoresearch-run.log"
+        remote_host = self.config.autoresearch_remote_host if self.config.use_remote_autoresearch() else ""
         started = time.monotonic()
         result = self.command_runner(
             ExternalCommand(
                 args=self._autoresearch_command(),
-                cwd=self.config.autoresearch_repo,
+                cwd=self.config.repo_root if remote_host else self.config.autoresearch_repo,
                 env=self.config.subprocess_env(),
                 timeout_seconds=self.config.autoresearch_timeout_seconds,
                 capture_output=False,
@@ -424,7 +426,7 @@ class ResearchOrchestrator:
         )
         runtime_seconds = round(time.monotonic() - started, 3)
 
-        commit = self._git_short_revision(self.config.autoresearch_repo)
+        commit = self._autoresearch_revision()
         description = f"{proposal.action_type.value} for {claim.title}"
         baseline_bpb = self._baseline_bpb_for_branch(claim=claim, branch=branch)
         results_tsv_path = self._results_tsv_path_for_claim(claim=claim, branch=branch)
@@ -470,6 +472,8 @@ class ResearchOrchestrator:
                 "ok": False,
                 "action": proposal.action_type.value,
                 "branch": branch,
+                "mode": "remote" if remote_host else "local",
+                "host": remote_host,
                 "run_log_path": str(run_log),
                 "results_tsv_path": str(results_tsv_path),
                 "imported_run": imported_run,
@@ -523,6 +527,8 @@ class ResearchOrchestrator:
             "ok": True,
             "action": proposal.action_type.value,
             "branch": branch,
+            "mode": "remote" if remote_host else "local",
+            "host": remote_host,
             "commit": commit,
             "status": status,
             "runtime_seconds": runtime_seconds,
@@ -634,10 +640,20 @@ class ResearchOrchestrator:
         return "keep" if val_bpb < baseline_bpb - 1e-4 else "discard"
 
     def _autoresearch_command(self) -> list[str]:
+        if self.config.use_remote_autoresearch():
+            remote_repo = self.config.remote_shell_path(self.config.autoresearch_remote_repo)
+            remote_script = f"set -e; cd {remote_repo}; uv run train.py"
+            return self.config.remote_ssh_command(f"bash -lc {shlex.quote(remote_script)}")
+
         launcher = self.config.launcher_for_project(self.config.autoresearch_repo)
         if not launcher.available:
             raise UnsupportedAutomatedActionError(launcher.detail)
         return [*launcher.command_prefix, "train.py"]
+
+    def _autoresearch_revision(self) -> str:
+        if self.config.use_remote_autoresearch():
+            return self._git_short_revision_remote()
+        return self._git_short_revision(self.config.autoresearch_repo)
 
     @staticmethod
     def _append_results_row(path: Path, row: dict[str, str]) -> None:
@@ -685,6 +701,31 @@ class ResearchOrchestrator:
             return revision
 
         return f"{revision}-dirty" if dirty.stdout.strip() else revision
+
+    def _git_short_revision_remote(self) -> str:
+        remote_repo = self.config.remote_shell_path(self.config.autoresearch_remote_repo)
+        remote_script = f"set -e; cd {remote_repo}; git rev-parse --short HEAD; git status --porcelain -- train.py"
+        try:
+            completed = subprocess.run(
+                self.config.remote_ssh_command(f"bash -lc {shlex.quote(remote_script)}"),
+                cwd=self.config.repo_root,
+                env=self.config.subprocess_env(),
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            return ""
+
+        if completed.returncode != 0:
+            return ""
+
+        lines = completed.stdout.splitlines()
+        if not lines:
+            return ""
+        revision = lines[0].strip()
+        dirty = any(line.strip() for line in lines[1:])
+        return f"{revision}-dirty" if dirty else revision
 
     @staticmethod
     def _persist_command_logs(
