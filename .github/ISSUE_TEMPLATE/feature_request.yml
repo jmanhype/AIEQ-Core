@@ -1,0 +1,48 @@
+name: Feature request
+description: Propose a concrete improvement to the ledger, controller, adapters, artifact graph, or developer workflow.
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for scoped, implementation-oriented improvements.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is missing or too weak today?
+      placeholder: The controller can pick a preferred autoresearch branch, but it still cannot compare branch efficiency explicitly.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the new behavior you want.
+    validations:
+      required: true
+  - type: textarea
+    id: value
+    attributes:
+      label: Why this matters
+      description: Explain what becomes more trustworthy, useful, or reproducible.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List the concrete signals that would make this feel done.
+      placeholder: |
+        - New metric appears in `claim_metrics()`
+        - Controller uses it in ranking
+        - Demo or tests exercise the new path
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Extra context
+      description: Link related files, issues, papers, or repos if relevant.

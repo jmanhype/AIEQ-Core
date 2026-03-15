@@ -1,5 +1,9 @@
 # AIEQ-Core
 
+[![CI](https://github.com/jmanhype/AIEQ-Core/actions/workflows/ci.yml/badge.svg)](https://github.com/jmanhype/AIEQ-Core/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/jmanhype/AIEQ-Core/blob/main/LICENSE)
+[![Python 3.10%2B](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://github.com/jmanhype/AIEQ-Core/blob/main/pyproject.toml)
+
 AIEQ-Core is the orchestration and memory layer for an automated research
 system designed to generate, test, write up, and stress-test unconventional
 scientific hypotheses.
@@ -80,8 +84,6 @@ The repo now contains the first concrete subsystem:
 - `external/denario`
   - cloned upstream research/paper pipeline
 
-## Quick start
-
 ## Demo
 
 Run the checked-in end-to-end demo:
@@ -98,6 +100,8 @@ intentionally sets up a contested claim, imports two `autoresearch` branches,
 records the controller's `run_experiment` decision, closes it with a follow-up
 run import, and ends with a fresh controller decision. The detailed walkthrough
 is in [`examples/demo/README.md`](/Users/speed/AIEQ-Core/examples/demo/README.md).
+
+## Quick start
 
 Create an empty ledger:
 
@@ -269,6 +273,16 @@ layer, rather than merging their internals into one monolith.
 
 This repo is still early, but the ledger core, controller, and first two
 integration adapters are in place.
+
+## Contributing
+
+Contribution guidance lives in [`CONTRIBUTING.md`](/Users/speed/AIEQ-Core/CONTRIBUTING.md).
+
+If you want to help quickly:
+
+- run the test suite with `python -m unittest discover -s tests -v`
+- run the demo with `python examples/demo/run_demo.py`
+- open a bug report, feature request, or research proposal from the GitHub issue templates
 
 ## Near-term build goals
 

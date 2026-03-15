@@ -1,0 +1,44 @@
+name: Research proposal
+description: Propose a new research-control mechanism, epistemic heuristic, or adapter idea for AIEQ-Core.
+title: "[Research] "
+labels:
+  - research
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for ideas that change how AIEQ-Core generates, evaluates, or critiques research.
+  - type: textarea
+    id: thesis
+    attributes:
+      label: Thesis
+      description: State the core idea in one or two sentences.
+      placeholder: Add an attack-selection policy that prioritizes attacks likely to flip claim status with minimal new cost.
+    validations:
+      required: true
+  - type: textarea
+    id: mechanism
+    attributes:
+      label: Mechanism
+      description: Explain how the idea would fit into the ledger, controller, or adapters.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Expected evidence of success
+      description: What would change in behavior if this idea works?
+    validations:
+      required: true
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks and failure modes
+      description: Explain how this could backfire or overfit the system.
+    validations:
+      required: true
+  - type: textarea
+    id: implementation
+    attributes:
+      label: Plausible implementation path
+      description: Outline a first practical cut.

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Architecture Notes
+    url: https://github.com/jmanhype/AIEQ-Core/blob/main/docs/architecture.md
+    about: Read the current system architecture before proposing deep structural changes.
+  - name: Demo Walkthrough
+    url: https://github.com/jmanhype/AIEQ-Core/blob/main/examples/demo/README.md
+    about: Reproduce the checked-in end-to-end flow before filing demo-related issues.

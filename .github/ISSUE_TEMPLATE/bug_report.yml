@@ -1,0 +1,53 @@
+name: Bug report
+description: Report a reproducible defect in the ledger, controller, adapters, demo, or CI flow.
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for concrete defects with a reproducible command, fixture, or workflow.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the bug in one paragraph.
+      placeholder: The controller recommends `generate_method` even though a Denario method artifact already exists.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include the exact commands, fixture paths, or workflow steps.
+      placeholder: |
+        1. Run `python examples/demo/run_demo.py`
+        2. Import a second Denario project into the same claim
+        3. Observe duplicate method artifacts
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Python version, OS, and any other relevant environment detail.
+      placeholder: Python 3.11 on macOS 15
+  - type: textarea
+    id: notes
+    attributes:
+      label: Logs or notes
+      description: Paste relevant output, stack traces, or controller decisions.
+      render: text
