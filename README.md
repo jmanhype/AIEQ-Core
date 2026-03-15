@@ -75,8 +75,12 @@ The repo now contains the first concrete subsystem:
   - adapter that imports Denario project directories into claims, evidence, attacks, method artifacts, and paper artifacts
 - `src/aieq_core/controller.py`
   - controller that chooses between generation, experimentation, critique, reproduction, and synthesis
+- `src/aieq_core/runtime.py`
+  - unified runtime config, provider-key detection, and capability diagnostics
+- `src/aieq_core/orchestrator.py`
+  - guarded execution layer that can launch supported Denario and `autoresearch` actions from this repo
 - `src/aieq_core/cli.py`
-  - minimal CLI for creating and inspecting the ledger
+  - CLI for ledger operations, diagnostics, and single-entrypoint execution
 - `docs/architecture.md`
   - architectural rationale and integration boundaries
 - `external/autoresearch`
@@ -100,6 +104,62 @@ intentionally sets up a contested claim, imports two `autoresearch` branches,
 records the controller's `run_experiment` decision, closes it with a follow-up
 run import, and ends with a fresh controller decision. The detailed walkthrough
 is in [`examples/demo/README.md`](/Users/speed/AIEQ-Core/examples/demo/README.md).
+
+## Single entrypoint
+
+`AIEQ-Core` can now act as the command surface for the supported external
+systems instead of only telling you what to run next.
+
+The current execution plane automates:
+
+- `generate_idea` via Denario
+- `generate_method` via Denario
+- `synthesize_paper` via Denario
+- `run_experiment` and `reproduce_result` via `autoresearch`
+
+It does this without collapsing the upstream repos into one monolith:
+
+- Denario still runs in its own repo and Python environment
+- `autoresearch` still runs in its own repo and Python environment
+- AIEQ-Core remains the ledger, controller, and execution orchestrator
+
+Copy the runtime template and set the keys or paths you actually need:
+
+```bash
+cp .env.example .env
+```
+
+Inspect readiness from this repo:
+
+```bash
+PYTHONPATH=src python -m aieq_core.cli doctor
+```
+
+If you already have a ledger, you can ask whether the current next action is
+actually runnable on this machine:
+
+```bash
+PYTHONPATH=src python -m aieq_core.cli doctor --ledger data/ledger.json
+```
+
+Then let AIEQ-Core decide and execute one supported step:
+
+```bash
+PYTHONPATH=src python -m aieq_core.cli run-next data/ledger.json \
+  --data-description-file /absolute/path/to/data_description.md
+```
+
+That command will:
+
+- read the ledger
+- record the controller decision
+- launch the external system in its own environment
+- import the resulting artifacts back into the ledger
+- emit the follow-up controller decision
+
+For `autoresearch`, the runner also writes a branch-local `results.tsv` under
+`.aieq-runtime/` and re-imports that series so the controller sees aggregate
+momentum, crash rate, and stagnation after each automated run.
 
 ## Quick start
 
@@ -256,6 +316,19 @@ experiment hints while still considering cross-branch breadth and plateau
 signals.
 It also reads first-class Denario method and paper artifacts, so methodology and
 paper presence no longer depend on ad hoc claim metadata alone.
+
+If you want the controller to only recommend without executing, keep using:
+
+```bash
+PYTHONPATH=src python -m aieq_core.cli decide-next data/ledger.json
+```
+
+If you want the repo to actually execute the next supported step from the same
+entrypoint, use:
+
+```bash
+PYTHONPATH=src python -m aieq_core.cli run-next data/ledger.json
+```
 
 ## External systems
 

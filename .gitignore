@@ -6,3 +6,5 @@ __pycache__/
 *.pyc
 external/
 examples/demo/output/
+.aieq-runtime/
+.env

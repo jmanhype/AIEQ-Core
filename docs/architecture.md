@@ -89,6 +89,11 @@ The initial codebase now contains:
 - `src/aieq_core/controller.py`
   - controller that routes work across Denario, autoresearch, and manual critique
   - and now persists decision/execution history so it can avoid blind repetition
+- `src/aieq_core/runtime.py`
+  - unified runtime contract for repo paths, model defaults, environment variables, and machine diagnostics
+- `src/aieq_core/orchestrator.py`
+  - execution plane that can launch supported Denario and `autoresearch` actions from this repo
+  - and then close the loop by importing the resulting artifacts back into the ledger
 
 The import adapters now accept controller decision ids, which means the ledger
 can connect:
@@ -130,7 +135,43 @@ two reasons:
 - Denario imports can update the same method or paper artifact in place on re-import
 - controller logic can detect methodology or paper presence without relying only on claim metadata
 
+## Execution plane
+
+This repo is no longer only a recommendation engine.
+
+The execution layer now makes a specific architectural choice:
+
+- `AIEQ-Core` is the control plane
+- Denario and `autoresearch` remain external execution engines
+- the integration happens through guarded subprocess boundaries plus structured imports
+
+That means `AIEQ-Core` can expose one command surface while still preserving:
+
+- separate Python/runtime requirements
+- upstream update boundaries
+- fault isolation
+- clearer licensing boundaries
+
+The execution plane currently automates:
+
+- Denario `generate_idea`
+- Denario `generate_method`
+- Denario `synthesize_paper`
+- `autoresearch` `run_experiment`
+- `autoresearch` `reproduce_result`
+
+It also introduces a capability-aware preflight layer:
+
+- repo launcher detection (`.venv` or `uv`)
+- provider-key checks against the configured Denario models
+- GPU and `autoresearch` cache checks
+- action-level readiness reporting through `doctor`
+
+That shifts the UX from “read the controller hint and manually piece together
+the environment” to “ask one repo what is runnable right now.”
+
 ## Immediate next build steps
 
-1. Compare branch-level exploration efficiency directly instead of only collapsing to a preferred branch.
-2. Expand the artifact graph to include plots, datasets, and reviews instead of only methods and papers.
+1. Automate more controller actions, especially `triage_attack` and `collect_counterevidence`, instead of leaving them manual.
+2. Expand the artifact graph to include plots, datasets, and review artifacts instead of only methods and papers.
+3. Build a capability-aware operator UI around the same runtime and controller primitives.

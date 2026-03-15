@@ -16,7 +16,9 @@ from .models import (
     ExecutionStatus,
     serialize_dataclass,
 )
+from .orchestrator import ResearchOrchestrator
 from .policy import ExpectedInformationGainPolicy
+from .runtime import RuntimeConfig
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -154,6 +156,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Persist the primary controller decision into ledger history",
     )
 
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Inspect runtime readiness for Denario/autoresearch execution from this repo",
+    )
+    doctor_parser.add_argument("--ledger", default="")
+    doctor_parser.add_argument("--env-file", default="")
+
+    run_next_parser = subparsers.add_parser(
+        "run-next",
+        help="Decide and execute the next supported action from this repo",
+    )
+    run_next_parser.add_argument("ledger", help="Path to the ledger JSON file")
+    run_next_parser.add_argument("--backlog-limit", type=int, default=5)
+    run_next_parser.add_argument("--dry-run", action="store_true")
+    run_next_parser.add_argument("--data-description", default="")
+    run_next_parser.add_argument("--data-description-file", default="")
+    run_next_parser.add_argument("--env-file", default="")
+
     execution_parser = subparsers.add_parser(
         "record-execution",
         help="Record the outcome of a previously planned or manual action",
@@ -194,6 +214,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         ledger.save()
         _emit({"ledger_path": str(ledger.path), "claims": 0})
         return 0
+
+    if args.command == "doctor":
+        config = RuntimeConfig.load(env_file=args.env_file or None)
+        orchestrator = ResearchOrchestrator(config=config)
+        payload = orchestrator.doctor(ledger_path=args.ledger or None)
+        _emit(payload)
+        return 0
+
+    if args.command == "run-next":
+        config = RuntimeConfig.load(env_file=args.env_file or None)
+        orchestrator = ResearchOrchestrator(config=config)
+        payload = orchestrator.run_next(
+            args.ledger,
+            backlog_limit=args.backlog_limit,
+            dry_run=args.dry_run,
+            data_description=args.data_description,
+            data_description_file=args.data_description_file,
+        )
+        _emit(payload)
+        return 0 if payload.get("ok", True) else 1
 
     ledger = EpistemicLedger.load(args.ledger)
 
