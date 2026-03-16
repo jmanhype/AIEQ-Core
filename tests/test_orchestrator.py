@@ -11,6 +11,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from aieq_core.ledger import EpistemicLedger
 from aieq_core.method_bridge import MethodBridgeDraft, MethodBridgeReview
+from aieq_core.modes.skill_optimizer import (
+    PromptEvalResponse,
+    PromptMutationDraft,
+    PromptMutationReview,
+)
 from aieq_core.orchestrator import CommandResult, ExternalCommand, ResearchOrchestrator
 from aieq_core.runtime import RuntimeConfig
 
@@ -59,10 +64,108 @@ def make_runtime_config(
         method_bridge_enabled=True,
         method_bridge_model="gpt-4.1",
         method_bridge_timeout_seconds=120,
+        skill_mutation_model="gpt-5-mini",
+        skill_review_model="gpt-5-mini",
+        skill_eval_model="gpt-5-mini",
+        skill_timeout_seconds=120,
     )
 
 
 class ResearchOrchestratorTests(unittest.TestCase):
+    def test_run_next_executes_skill_optimizer_mode_end_to_end(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = make_runtime_config(root, openai_key=True)
+            ledger_path = root / "ledger.json"
+            ledger = EpistemicLedger.load(ledger_path)
+            claim = ledger.add_claim(
+                title="Optimize support skill",
+                statement="Improve the support skill against the eval suite.",
+                metadata={"mode": "skill_optimizer"},
+            )
+            target = ledger.register_target(
+                claim_id=claim.id,
+                mode="skill_optimizer",
+                target_type="prompt_template",
+                title="Support skill",
+                content="Answer the user briefly.",
+                invariant_constraints={"required_phrases": ["Answer"]},
+            )
+            ledger.register_eval_suite(
+                claim_id=claim.id,
+                target_id=target.id,
+                name="support-suite",
+                compatible_target_type="prompt_template",
+                pass_threshold=0.75,
+                repetitions=1,
+                cases=[
+                    {
+                        "id": "case-1",
+                        "input": "Explain the refund policy.",
+                        "criteria": [{"type": "contains_all", "values": ["refund", "policy"]}],
+                    }
+                ],
+            )
+
+            class FakeSkillClient:
+                def mutate(self, **_: object) -> PromptMutationDraft:
+                    return PromptMutationDraft(
+                        model="gpt-5-mini",
+                        prompt="mutation prompt",
+                        summary="Mention refund policy explicitly.",
+                        content="Answer clearly and include the refund policy details.",
+                        response_id="resp_mutation",
+                        usage={"total_tokens": 120},
+                        raw_response={"id": "resp_mutation"},
+                    )
+
+                def review(self, **_: object) -> PromptMutationReview:
+                    return PromptMutationReview(
+                        model="gpt-5-mini",
+                        prompt="review prompt",
+                        approved=True,
+                        summary="Looks good.",
+                        blockers=[],
+                        warnings=[],
+                        response_id="resp_review",
+                        usage={"total_tokens": 80},
+                        raw_response={"id": "resp_review"},
+                    )
+
+                def evaluate_case(self, **_: object) -> PromptEvalResponse:
+                    return PromptEvalResponse(
+                        model="gpt-5-mini",
+                        prompt="Explain the refund policy.",
+                        output_text="The refund policy allows refunds within 30 days.",
+                        response_id="resp_eval",
+                        usage={"total_tokens": 90},
+                        raw_response={"id": "resp_eval"},
+                    )
+
+            with patch(
+                "aieq_core.modes.skill_optimizer.SkillOptimizerMode._client",
+                return_value=FakeSkillClient(),
+            ):
+                orchestrator = ResearchOrchestrator(config=config)
+                mutation_payload = orchestrator.run_next(ledger_path, mode="skill_optimizer")
+                eval_payload = orchestrator.run_next(ledger_path, mode="skill_optimizer")
+                promote_payload = orchestrator.run_next(ledger_path, mode="skill_optimizer")
+
+            self.assertTrue(mutation_payload["ok"])
+            self.assertEqual(mutation_payload["result"]["action"], "design_mutation")
+            self.assertTrue(eval_payload["ok"])
+            self.assertEqual(eval_payload["result"]["action"], "run_eval")
+            self.assertTrue(promote_payload["ok"])
+            self.assertEqual(promote_payload["result"]["action"], "promote_winner")
+
+            snapshot = EpistemicLedger.load(ledger_path).claim_snapshot(claim.id)
+            self.assertEqual(snapshot["metrics"]["target_count"], 1)
+            self.assertEqual(snapshot["metrics"]["eval_suite_count"], 1)
+            self.assertEqual(snapshot["metrics"]["mutation_candidate_count"], 1)
+            self.assertEqual(snapshot["metrics"]["eval_run_count"], 1)
+            self.assertEqual(snapshot["metrics"]["promoted_candidate_count"], 1)
+            self.assertGreaterEqual(snapshot["metrics"]["optimization_best_score"], 1.0)
+
     def test_run_next_bootstraps_denario_project_and_imports_claim(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

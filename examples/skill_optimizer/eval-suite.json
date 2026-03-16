@@ -1,0 +1,23 @@
+{
+  "name": "support-reply-suite",
+  "compatible_target_type": "prompt_template",
+  "aggregation": "average",
+  "pass_threshold": 0.75,
+  "repetitions": 1,
+  "cases": [
+    {
+      "id": "refund-policy",
+      "input": "Explain the refund policy in one short paragraph.",
+      "criteria": [
+        {
+          "type": "contains_all",
+          "values": ["refund", "policy"]
+        },
+        {
+          "type": "max_length",
+          "value": 260
+        }
+      ]
+    }
+  ]
+}

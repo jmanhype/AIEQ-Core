@@ -8,6 +8,7 @@ from typing import Any
 from .models import (
     Assumption,
     Artifact,
+    ArtifactTarget,
     ArtifactKind,
     Attack,
     AttackStatus,
@@ -16,8 +17,12 @@ from .models import (
     DecisionRecord,
     Evidence,
     EvidenceDirection,
+    EvalRun,
+    EvalSuite,
     ExecutionRecord,
     ExecutionStatus,
+    MutationCandidate,
+    ReviewStatus,
     ActionExecutor,
     ActionProposal,
     ActionType,
@@ -26,7 +31,7 @@ from .models import (
     utc_now,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class EpistemicLedger:
@@ -41,6 +46,10 @@ class EpistemicLedger:
         evidence: dict[str, Evidence] | None = None,
         attacks: dict[str, Attack] | None = None,
         artifacts: dict[str, Artifact] | None = None,
+        targets: dict[str, ArtifactTarget] | None = None,
+        eval_suites: dict[str, EvalSuite] | None = None,
+        mutation_candidates: dict[str, MutationCandidate] | None = None,
+        eval_runs: dict[str, EvalRun] | None = None,
         decisions: dict[str, DecisionRecord] | None = None,
         executions: dict[str, ExecutionRecord] | None = None,
     ) -> None:
@@ -50,6 +59,10 @@ class EpistemicLedger:
         self.evidence = evidence or {}
         self.attacks = attacks or {}
         self.artifacts = artifacts or {}
+        self.targets = targets or {}
+        self.eval_suites = eval_suites or {}
+        self.mutation_candidates = mutation_candidates or {}
+        self.eval_runs = eval_runs or {}
         self.decisions = decisions or {}
         self.executions = executions or {}
         self._rebuild_indexes()
@@ -104,6 +117,29 @@ class EpistemicLedger:
             )
             for raw in payload.get("artifacts", [])
         }
+        targets = {
+            raw["id"]: ArtifactTarget(**raw)
+            for raw in payload.get("targets", [])
+        }
+        eval_suites = {
+            raw["id"]: EvalSuite(**raw)
+            for raw in payload.get("eval_suites", [])
+        }
+        mutation_candidates = {
+            raw["id"]: MutationCandidate(
+                **{
+                    **raw,
+                    "review_status": ReviewStatus(
+                        raw.get("review_status", ReviewStatus.PENDING.value)
+                    ),
+                }
+            )
+            for raw in payload.get("mutation_candidates", [])
+        }
+        eval_runs = {
+            raw["id"]: EvalRun(**raw)
+            for raw in payload.get("eval_runs", [])
+        }
         decisions = {
             raw["id"]: DecisionRecord(
                 **{
@@ -132,6 +168,10 @@ class EpistemicLedger:
             evidence=evidence,
             attacks=attacks,
             artifacts=artifacts,
+            targets=targets,
+            eval_suites=eval_suites,
+            mutation_candidates=mutation_candidates,
+            eval_runs=eval_runs,
             decisions=decisions,
             executions=executions,
         )
@@ -160,6 +200,24 @@ class EpistemicLedger:
             "artifacts": [
                 serialize_dataclass(item)
                 for item in sorted(self.artifacts.values(), key=lambda item: item.created_at)
+            ],
+            "targets": [
+                serialize_dataclass(item)
+                for item in sorted(self.targets.values(), key=lambda item: item.created_at)
+            ],
+            "eval_suites": [
+                serialize_dataclass(item)
+                for item in sorted(self.eval_suites.values(), key=lambda item: item.created_at)
+            ],
+            "mutation_candidates": [
+                serialize_dataclass(item)
+                for item in sorted(
+                    self.mutation_candidates.values(), key=lambda item: item.created_at
+                )
+            ],
+            "eval_runs": [
+                serialize_dataclass(item)
+                for item in sorted(self.eval_runs.values(), key=lambda item: item.created_at)
             ],
             "decisions": [
                 serialize_dataclass(item)
@@ -194,6 +252,15 @@ class EpistemicLedger:
             "artifacts": [
                 serialize_dataclass(item) for item in self.artifacts_for_claim(claim_id)
             ],
+            "targets": [serialize_dataclass(item) for item in self.targets_for_claim(claim_id)],
+            "eval_suites": [
+                serialize_dataclass(item) for item in self.eval_suites_for_claim(claim_id)
+            ],
+            "mutation_candidates": [
+                serialize_dataclass(item)
+                for item in self.mutation_candidates_for_claim(claim_id)
+            ],
+            "eval_runs": [serialize_dataclass(item) for item in self.eval_runs_for_claim(claim_id)],
             "decisions": [
                 serialize_dataclass(item) for item in self.decisions_for_claim(claim_id)
             ],
@@ -210,12 +277,17 @@ class EpistemicLedger:
                 {
                     "claim_id": claim.id,
                     "title": claim.title,
+                    "mode": str(claim.metadata.get("mode", "")).strip() or "ml_research",
                     "status": claim.status.value,
                     "confidence": round(claim.confidence, 3),
                     "uncertainty": round(metrics["uncertainty"], 3),
                     "evidence_count": metrics["evidence_count"],
                     "open_attack_count": metrics["open_attack_count"],
                     "artifact_count": metrics["artifact_count"],
+                    "target_count": metrics["target_count"],
+                    "eval_suite_count": metrics["eval_suite_count"],
+                    "mutation_candidate_count": metrics["mutation_candidate_count"],
+                    "eval_run_count": metrics["eval_run_count"],
                     "decision_count": metrics["decision_count"],
                     "execution_count": metrics["execution_count"],
                     "novelty": round(claim.novelty, 3),
@@ -366,6 +438,172 @@ class EpistemicLedger:
         self.save()
         return artifact
 
+    def register_target(
+        self,
+        *,
+        claim_id: str,
+        mode: str,
+        target_type: str,
+        title: str,
+        content: str = "",
+        source_type: str = "manual",
+        source_ref: str = "",
+        source_path: str = "",
+        mutable_fields: list[str] | None = None,
+        invariant_constraints: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        target_id: str | None = None,
+    ) -> ArtifactTarget:
+        self.get_claim(claim_id)
+        target = ArtifactTarget(
+            id=target_id or self._generate_id("tgt"),
+            claim_id=claim_id,
+            mode=mode,
+            target_type=target_type,
+            title=title,
+            content=content,
+            source_type=source_type,
+            source_ref=source_ref,
+            source_path=source_path,
+            mutable_fields=mutable_fields or [],
+            invariant_constraints=invariant_constraints or {},
+            metadata=metadata or {},
+        )
+        self.targets[target.id] = target
+        self.save()
+        return target
+
+    def register_eval_suite(
+        self,
+        *,
+        claim_id: str,
+        target_id: str,
+        name: str,
+        compatible_target_type: str,
+        scoring_method: str = "binary",
+        aggregation: str = "average",
+        pass_threshold: float = 1.0,
+        repetitions: int = 1,
+        cases: list[dict[str, Any]] | None = None,
+        metadata: dict[str, Any] | None = None,
+        suite_id: str | None = None,
+    ) -> EvalSuite:
+        self.get_claim(claim_id)
+        self.get_target(target_id)
+        suite = EvalSuite(
+            id=suite_id or self._generate_id("eval"),
+            claim_id=claim_id,
+            target_id=target_id,
+            name=name,
+            compatible_target_type=compatible_target_type,
+            scoring_method=scoring_method,
+            aggregation=aggregation,
+            pass_threshold=pass_threshold,
+            repetitions=repetitions,
+            cases=cases or [],
+            metadata=metadata or {},
+        )
+        self.eval_suites[suite.id] = suite
+        self.save()
+        return suite
+
+    def add_mutation_candidate(
+        self,
+        *,
+        claim_id: str,
+        target_id: str,
+        summary: str,
+        content: str,
+        source_type: str = "manual",
+        source_ref: str = "",
+        source_path: str = "",
+        parent_candidate_id: str = "",
+        review_status: ReviewStatus | str = ReviewStatus.PENDING,
+        review_notes: str = "",
+        artifact_paths: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        candidate_id: str | None = None,
+    ) -> MutationCandidate:
+        self.get_claim(claim_id)
+        self.get_target(target_id)
+        candidate = MutationCandidate(
+            id=candidate_id or self._generate_id("cand"),
+            claim_id=claim_id,
+            target_id=target_id,
+            parent_candidate_id=parent_candidate_id,
+            summary=summary,
+            content=content,
+            source_type=source_type,
+            source_ref=source_ref,
+            source_path=source_path,
+            review_status=(
+                review_status
+                if isinstance(review_status, ReviewStatus)
+                else ReviewStatus(review_status)
+            ),
+            review_notes=review_notes,
+            artifact_paths=artifact_paths or [],
+            metadata=metadata or {},
+        )
+        self.mutation_candidates[candidate.id] = candidate
+        self.save()
+        return candidate
+
+    def record_eval_run(
+        self,
+        *,
+        claim_id: str,
+        target_id: str,
+        suite_id: str,
+        candidate_id: str,
+        case_id: str,
+        run_index: int,
+        score: float,
+        passed: bool,
+        raw_output: str = "",
+        runtime_seconds: float | None = None,
+        cost_estimate_usd: float | None = None,
+        artifact_paths: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        eval_run_id: str | None = None,
+    ) -> EvalRun:
+        self.get_claim(claim_id)
+        self.get_target(target_id)
+        self.get_eval_suite(suite_id)
+        self.get_mutation_candidate(candidate_id)
+        eval_run = EvalRun(
+            id=eval_run_id or self._generate_id("erun"),
+            claim_id=claim_id,
+            target_id=target_id,
+            suite_id=suite_id,
+            candidate_id=candidate_id,
+            case_id=case_id,
+            run_index=run_index,
+            score=score,
+            passed=passed,
+            raw_output=raw_output,
+            runtime_seconds=runtime_seconds,
+            cost_estimate_usd=cost_estimate_usd,
+            artifact_paths=artifact_paths or [],
+            metadata=metadata or {},
+        )
+        self.eval_runs[eval_run.id] = eval_run
+        self.save()
+        return eval_run
+
+    def promote_candidate(
+        self,
+        *,
+        target_id: str,
+        candidate_id: str,
+    ) -> ArtifactTarget:
+        target = self.get_target(target_id)
+        self.get_mutation_candidate(candidate_id)
+        target.promoted_candidate_id = candidate_id
+        target.updated_at = utc_now()
+        self.save()
+        return target
+
     def upsert_artifact(
         self,
         *,
@@ -437,6 +675,34 @@ class EpistemicLedger:
             if artifact_id in self.artifacts
         ]
 
+    def targets_for_claim(self, claim_id: str) -> list[ArtifactTarget]:
+        return [
+            self.targets[target_id]
+            for target_id in self.get_claim(claim_id).target_ids
+            if target_id in self.targets
+        ]
+
+    def eval_suites_for_claim(self, claim_id: str) -> list[EvalSuite]:
+        return [
+            self.eval_suites[suite_id]
+            for suite_id in self.get_claim(claim_id).eval_suite_ids
+            if suite_id in self.eval_suites
+        ]
+
+    def mutation_candidates_for_claim(self, claim_id: str) -> list[MutationCandidate]:
+        return [
+            self.mutation_candidates[candidate_id]
+            for candidate_id in self.get_claim(claim_id).mutation_candidate_ids
+            if candidate_id in self.mutation_candidates
+        ]
+
+    def eval_runs_for_claim(self, claim_id: str) -> list[EvalRun]:
+        return [
+            self.eval_runs[eval_run_id]
+            for eval_run_id in self.get_claim(claim_id).eval_run_ids
+            if eval_run_id in self.eval_runs
+        ]
+
     def decisions_for_claim(self, claim_id: str) -> list[DecisionRecord]:
         return [
             self.decisions[decision_id]
@@ -463,6 +729,24 @@ class EpistemicLedger:
         except KeyError as exc:
             raise KeyError(f"Unknown decision id: {decision_id}") from exc
 
+    def get_target(self, target_id: str) -> ArtifactTarget:
+        try:
+            return self.targets[target_id]
+        except KeyError as exc:
+            raise KeyError(f"Unknown target id: {target_id}") from exc
+
+    def get_eval_suite(self, suite_id: str) -> EvalSuite:
+        try:
+            return self.eval_suites[suite_id]
+        except KeyError as exc:
+            raise KeyError(f"Unknown eval suite id: {suite_id}") from exc
+
+    def get_mutation_candidate(self, candidate_id: str) -> MutationCandidate:
+        try:
+            return self.mutation_candidates[candidate_id]
+        except KeyError as exc:
+            raise KeyError(f"Unknown mutation candidate id: {candidate_id}") from exc
+
     def list_decisions(self) -> list[DecisionRecord]:
         return sorted(self.decisions.values(), key=lambda item: item.created_at)
 
@@ -482,6 +766,7 @@ class EpistemicLedger:
             claim_title=proposal.claim_title,
             action_type=proposal.action_type,
             executor=proposal.executor,
+            mode=proposal.mode,
             stage=proposal.stage,
             priority=proposal.priority,
             expected_information_gain=proposal.expected_information_gain,
@@ -502,6 +787,7 @@ class EpistemicLedger:
         claim_title: str = "",
         action_type: ActionType | str | None = None,
         executor: ActionExecutor | str = ActionExecutor.MANUAL,
+        mode: str = "",
         notes: str = "",
         runtime_seconds: float | None = None,
         cost_estimate_usd: float | None = None,
@@ -520,6 +806,8 @@ class EpistemicLedger:
                 action_type = decision.action_type
             if executor in {"", ActionExecutor.MANUAL, "manual"}:
                 executor = decision.executor
+            if not mode:
+                mode = decision.mode
 
         if action_type is None:
             raise ValueError("record_execution requires either decision_id or action_type")
@@ -536,6 +824,7 @@ class EpistemicLedger:
             action_type=action_type if isinstance(action_type, ActionType) else ActionType(action_type),
             executor=executor if isinstance(executor, ActionExecutor) else ActionExecutor(executor),
             status=status if isinstance(status, ExecutionStatus) else ExecutionStatus(status),
+            mode=mode,
             notes=notes,
             runtime_seconds=runtime_seconds,
             cost_estimate_usd=cost_estimate_usd,
@@ -568,6 +857,10 @@ class EpistemicLedger:
         evidence = self.evidence_for_claim(claim_id)
         attacks = self.attacks_for_claim(claim_id)
         artifacts = self.artifacts_for_claim(claim_id)
+        targets = self.targets_for_claim(claim_id)
+        eval_suites = self.eval_suites_for_claim(claim_id)
+        mutation_candidates = self.mutation_candidates_for_claim(claim_id)
+        eval_runs = self.eval_runs_for_claim(claim_id)
         decisions = self.decisions_for_claim(claim_id)
         executions = self.executions_for_claim(claim_id)
         autoresearch_meta = claim.metadata.get("autoresearch", {})
@@ -656,6 +949,55 @@ class EpistemicLedger:
         paper_artifact_count = len(
             [item for item in artifacts if item.kind == ArtifactKind.PAPER]
         )
+        candidate_scores: dict[str, list[float]] = {}
+        candidate_passes: dict[str, list[bool]] = {}
+        for eval_run in eval_runs:
+            candidate_scores.setdefault(eval_run.candidate_id, []).append(eval_run.score)
+            candidate_passes.setdefault(eval_run.candidate_id, []).append(eval_run.passed)
+
+        best_candidate_id = ""
+        best_candidate_score = 0.0
+        candidate_average_pass_rate = 0.0
+        promoted_candidate_count = len(
+            [item for item in targets if item.promoted_candidate_id.strip()]
+        )
+        threshold_met = False
+        evaluated_candidates = []
+        for candidate in mutation_candidates:
+            scores = candidate_scores.get(candidate.id, [])
+            passes = candidate_passes.get(candidate.id, [])
+            if not scores:
+                continue
+            average_score = sum(scores) / len(scores)
+            pass_rate = (
+                sum(1 for item in passes if item) / len(passes) if passes else 0.0
+            )
+            if average_score > best_candidate_score:
+                best_candidate_score = average_score
+                best_candidate_id = candidate.id
+            candidate_average_pass_rate += pass_rate
+            evaluated_candidates.append((candidate, average_score))
+
+        candidate_average_pass_rate = (
+            candidate_average_pass_rate / len(evaluated_candidates)
+            if evaluated_candidates
+            else 0.0
+        )
+        stagnation_candidate_count = 0
+        running_best = -1.0
+        last_improvement_index = -1
+        for index, (_, average_score) in enumerate(
+            sorted(evaluated_candidates, key=lambda item: item[0].created_at)
+        ):
+            if average_score > running_best + 1e-9:
+                running_best = average_score
+                last_improvement_index = index
+        if evaluated_candidates:
+            stagnation_candidate_count = max(0, len(evaluated_candidates) - last_improvement_index - 1)
+        for suite in eval_suites:
+            if best_candidate_score >= suite.pass_threshold:
+                threshold_met = True
+                break
 
         return {
             "belief": round(belief, 6),
@@ -670,6 +1012,26 @@ class EpistemicLedger:
             "artifact_count": len(artifacts),
             "method_artifact_count": method_artifact_count,
             "paper_artifact_count": paper_artifact_count,
+            "target_count": len(targets),
+            "eval_suite_count": len(eval_suites),
+            "mutation_candidate_count": len(mutation_candidates),
+            "eval_run_count": len(eval_runs),
+            "reviewed_candidate_count": len(
+                [
+                    item
+                    for item in mutation_candidates
+                    if item.review_status in {ReviewStatus.APPROVED, ReviewStatus.REJECTED}
+                ]
+            ),
+            "approved_candidate_count": len(
+                [item for item in mutation_candidates if item.review_status == ReviewStatus.APPROVED]
+            ),
+            "promoted_candidate_count": promoted_candidate_count,
+            "optimization_best_candidate_id": best_candidate_id,
+            "optimization_best_score": round(best_candidate_score, 6),
+            "optimization_average_pass_rate": round(candidate_average_pass_rate, 6),
+            "optimization_threshold_met": threshold_met,
+            "optimization_stagnation_candidate_count": stagnation_candidate_count,
             "assumption_risk": round(average_assumption_risk, 6),
             "decision_count": len(decisions),
             "execution_count": len(executions),
@@ -743,6 +1105,10 @@ class EpistemicLedger:
             claim.evidence_ids = []
             claim.attack_ids = []
             claim.artifact_ids = []
+            claim.target_ids = []
+            claim.eval_suite_ids = []
+            claim.mutation_candidate_ids = []
+            claim.eval_run_ids = []
             claim.decision_ids = []
             claim.execution_ids = []
 
@@ -761,6 +1127,22 @@ class EpistemicLedger:
         for artifact in self.artifacts.values():
             if artifact.claim_id in self.claims:
                 self.claims[artifact.claim_id].artifact_ids.append(artifact.id)
+
+        for target in self.targets.values():
+            if target.claim_id in self.claims:
+                self.claims[target.claim_id].target_ids.append(target.id)
+
+        for suite in self.eval_suites.values():
+            if suite.claim_id in self.claims:
+                self.claims[suite.claim_id].eval_suite_ids.append(suite.id)
+
+        for candidate in self.mutation_candidates.values():
+            if candidate.claim_id in self.claims:
+                self.claims[candidate.claim_id].mutation_candidate_ids.append(candidate.id)
+
+        for eval_run in self.eval_runs.values():
+            if eval_run.claim_id in self.claims:
+                self.claims[eval_run.claim_id].eval_run_ids.append(eval_run.id)
 
         for decision in self.decisions.values():
             if decision.claim_id in self.claims:

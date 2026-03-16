@@ -53,6 +53,10 @@ class RuntimeDoctorTests(unittest.TestCase):
                 method_bridge_enabled=True,
                 method_bridge_model="gpt-4.1",
                 method_bridge_timeout_seconds=120,
+                skill_mutation_model="gpt-5-mini",
+                skill_review_model="gpt-5-mini",
+                skill_eval_model="gpt-5-mini",
+                skill_timeout_seconds=120,
             )
 
             def fake_which(binary: str) -> str | None:
@@ -106,6 +110,10 @@ class RuntimeDoctorTests(unittest.TestCase):
                 method_bridge_enabled=True,
                 method_bridge_model="gpt-4.1",
                 method_bridge_timeout_seconds=120,
+                skill_mutation_model="gpt-5-mini",
+                skill_review_model="gpt-5-mini",
+                skill_eval_model="gpt-5-mini",
+                skill_timeout_seconds=120,
             )
 
             remote_worker = RemoteAutoresearchWorker(
@@ -137,6 +145,52 @@ class RuntimeDoctorTests(unittest.TestCase):
                 report["repos"]["autoresearch"]["remote_worker"]["repo_path"],
                 "/home/straughter/autoresearch",
             )
+
+    def test_doctor_reports_skill_optimizer_capabilities_when_openai_key_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            autoresearch_repo = root / "external" / "autoresearch"
+            denario_repo = root / "external" / "denario"
+            for repo in (autoresearch_repo, denario_repo):
+                (repo / ".venv" / "bin").mkdir(parents=True, exist_ok=True)
+                (repo / ".venv" / "bin" / "python").write_text("", encoding="utf-8")
+            (autoresearch_repo / "train.py").write_text("print('train')\n", encoding="utf-8")
+
+            config = RuntimeConfig(
+                repo_root=root,
+                env_file=None,
+                env={"OPENAI_API_KEY": "test-openai-key", "GOOGLE_API_KEY": "test-key"},
+                runtime_dir=root / ".aieq-runtime",
+                denario_projects_dir=root / ".aieq-runtime" / "denario",
+                autoresearch_output_dir=root / ".aieq-runtime" / "autoresearch",
+                autoresearch_repo=autoresearch_repo,
+                denario_repo=denario_repo,
+                autoresearch_remote_host="",
+                autoresearch_remote_repo="",
+                default_autoresearch_branch="main",
+                autoresearch_timeout_seconds=600,
+                denario_timeout_seconds=1800,
+                denario_mode="fast",
+                denario_idea_llm="gemini-2.0-flash",
+                denario_method_llm="gemini-2.0-flash",
+                denario_paper_llm="gemini-2.5-flash",
+                denario_paper_journal="NONE",
+                default_data_description_file="",
+                method_bridge_enabled=True,
+                method_bridge_model="gpt-4.1",
+                method_bridge_timeout_seconds=120,
+                skill_mutation_model="gpt-5-mini",
+                skill_review_model="gpt-5-mini",
+                skill_eval_model="gpt-5-mini",
+                skill_timeout_seconds=120,
+            )
+
+            with patch("aieq_core.runtime.shutil.which", return_value="/usr/bin/git"):
+                report = doctor_report(config)
+
+            self.assertTrue(report["capabilities"]["design_mutation"]["available"])
+            self.assertTrue(report["capabilities"]["run_eval"]["available"])
+            self.assertTrue(report["capabilities"]["promote_winner"]["available"])
 
 
 if __name__ == "__main__":

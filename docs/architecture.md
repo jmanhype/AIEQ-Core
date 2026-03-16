@@ -3,7 +3,7 @@
 ## Thesis
 
 `AIEQ-Core` should not treat research as a linear prompt chain. It should treat
-research as a persistent belief graph:
+innovation as a persistent belief graph:
 
 - claims are the units of novelty
 - assumptions are the hidden load-bearing beams
@@ -11,8 +11,8 @@ research as a persistent belief graph:
 - attacks act as explicit falsifiers
 - the controller chooses what to do next based on expected information gain
 
-That ledger is the central addition that makes the hybrid system compounding
-instead of stateless.
+That ledger is the central addition that makes the system compounding instead
+of stateless.
 
 ## Why this matters
 
@@ -21,27 +21,46 @@ Without a ledger:
 - `autoresearch` can run many experiments but has weak long-term memory
 - `Denario` can generate ideas, methods, and papers but much of its output is
   prose-first
+- prompt or skill optimization loops forget which mutations already failed
 - critique risks becoming generic instead of claim-specific
 
 With a ledger:
 
-- experiment runs become evidence objects tied to claims
+- experiment runs and eval runs become evidence objects tied to claims
 - Denario outputs can be written back as claims, methods, papers, and attacks
+- prompt/skill optimization can be tracked with explicit targets, mutation candidates, eval suites, and promoted winners
 - novelty can be scored and revisited across runs
 - the next action is selected from the current epistemic bottleneck
+
+## Dual-layer shape
+
+The repo now has two layers:
+
+- a **generic innovation kernel**
+  - ledger
+  - controller
+  - policy
+  - execution history
+  - shared runtime config
+- a **mode layer**
+  - `ml_research`
+  - `skill_optimizer`
+
+The kernel owns long-term memory and decision logic. Modes own domain-specific
+mutation, evaluation, import, and execution behavior.
 
 ## Proposed control loop
 
 1. Generate or import a claim.
-2. Attach assumptions that must hold for the claim to survive.
-3. Run an experiment or analysis and record structured evidence.
-4. Generate attacks against the claim, method, assumptions, or evidence.
+2. Attach assumptions, targets, and eval contracts that must hold for the claim to survive.
+3. Run an experiment or evaluation and record structured evidence.
+4. Generate attacks against the claim, mutation, assumptions, or evidence.
 5. Rank the next action by expected information gain.
 6. Repeat until confidence is high enough or the claim is falsified.
 
 ## Integration boundaries
 
-### `autoresearch`
+### `ml_research`
 
 `autoresearch` should remain the bounded experiment engine.
 
@@ -55,6 +74,21 @@ Expected write-back into the ledger:
 - evidence direction: support, contradict, or inconclusive
 - aggregate history summaries from `results.tsv`, including keep rate, crash rate, stagnation, and best frontier improvement
 - separate rollups per branch, plus one preferred branch for controller execution hints
+
+### `skill_optimizer`
+
+`skill_optimizer` is the first non-ML proof that the repo is now a generic
+innovation engine.
+
+Expected write-back into the ledger:
+
+- target registration
+- eval suite registration
+- mutation candidates
+- review outcomes
+- repeated eval runs
+- aggregate candidate scores and pass rates
+- promoted winner snapshots
 
 ### `Denario`
 
@@ -71,14 +105,16 @@ Expected write-back into the ledger:
 
 ## Current implementation
 
-The initial codebase now contains:
+The current codebase now contains:
 
 - `src/aieq_core/ledger.py`
   - persistent JSON ledger
 - `src/aieq_core/models.py`
-  - typed schema for claims, assumptions, evidence, attacks, artifacts, and actions
+  - typed schema for claims, assumptions, evidence, attacks, artifacts, actions, targets, eval suites, mutation candidates, and eval runs
 - `src/aieq_core/policy.py`
   - expected-information-gain ranking policy
+- `src/aieq_core/modes/`
+  - pluggable mode adapters for `ml_research` and `skill_optimizer`
 - `src/aieq_core/cli.py`
   - minimal CLI for interacting with the ledger
 - `src/aieq_core/adapters/autoresearch.py`
@@ -129,11 +165,12 @@ treated the same as a fresh claim with the same current evidence count, and a
 claim with one dead branch plus one live branch is no longer treated like a
 fully exhausted search.
 
-Methods and papers are now first-class artifact nodes as well. That matters for
-two reasons:
+Methods and papers are now first-class artifact nodes as well, and prompt
+optimization has its own first-class target/eval/mutation graph. That matters
+for two reasons:
 
 - Denario imports can update the same method or paper artifact in place on re-import
-- controller logic can detect methodology or paper presence without relying only on claim metadata
+- controller logic can detect methodology, promoted candidates, or eval readiness without relying only on claim metadata
 
 ## Execution plane
 
@@ -159,6 +196,10 @@ The execution plane currently automates:
 - Denario `synthesize_paper`
 - `autoresearch` `run_experiment`
 - `autoresearch` `reproduce_result`
+- skill optimization `design_mutation`
+- skill optimization `run_eval`
+- skill optimization `analyze_failure`
+- skill optimization `promote_winner`
 
 The `autoresearch` side can now target either:
 
@@ -188,6 +229,7 @@ It also introduces a capability-aware preflight layer:
 - provider-key checks for the method bridge model
 - local or remote GPU and `autoresearch` cache checks
 - action-level readiness reporting through `doctor`
+- per-mode readiness via `doctor --mode <mode>`
 
 That shifts the UX from “read the controller hint and manually piece together
 the environment” to “ask one repo what is runnable right now.”
@@ -196,4 +238,5 @@ the environment” to “ask one repo what is runnable right now.”
 
 1. Automate more controller actions, especially `triage_attack` and `collect_counterevidence`, instead of leaving them manual.
 2. Expand the artifact graph to include plots, datasets, and review artifacts instead of only methods and papers.
-3. Build a capability-aware operator UI around the same runtime and controller primitives.
+3. Generalize the eval runners so later modes can optimize product policies, landing pages, and workflow prompts using the same target/eval contract.
+4. Build a capability-aware operator UI around the same runtime and controller primitives.

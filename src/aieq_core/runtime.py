@@ -98,10 +98,16 @@ def provider_env_key(provider: str) -> str:
 def capability_key_for_action(action_type: ActionType) -> str:
     mapping = {
         ActionType.GENERATE_IDEA: "generate_idea",
+        ActionType.PROPOSE_HYPOTHESIS: "generate_idea",
         ActionType.GENERATE_METHOD: "generate_method",
+        ActionType.DESIGN_MUTATION: "design_mutation",
         ActionType.RUN_EXPERIMENT: "run_experiment",
         ActionType.REPRODUCE_RESULT: "run_experiment",
+        ActionType.RUN_EVAL: "run_eval",
+        ActionType.ANALYZE_FAILURE: "analyze_failure",
+        ActionType.PROMOTE_WINNER: "promote_winner",
         ActionType.SYNTHESIZE_PAPER: "synthesize_paper",
+        ActionType.SYNTHESIZE_REPORT: "synthesize_report",
     }
     return mapping.get(action_type, "manual_only")
 
@@ -155,6 +161,10 @@ class RuntimeConfig:
     method_bridge_enabled: bool
     method_bridge_model: str
     method_bridge_timeout_seconds: int
+    skill_mutation_model: str
+    skill_review_model: str
+    skill_eval_model: str
+    skill_timeout_seconds: int
 
     @classmethod
     def load(cls, *, env_file: str | Path | None = None) -> "RuntimeConfig":
@@ -223,6 +233,13 @@ class RuntimeConfig:
             method_bridge_timeout_seconds=int(
                 env.get("AIEQ_METHOD_BRIDGE_TIMEOUT_SECONDS", "120")
             ),
+            skill_mutation_model=env.get("AIEQ_SKILL_MUTATION_MODEL", "gpt-5-mini").strip()
+            or "gpt-5-mini",
+            skill_review_model=env.get("AIEQ_SKILL_REVIEW_MODEL", "gpt-5-mini").strip()
+            or "gpt-5-mini",
+            skill_eval_model=env.get("AIEQ_SKILL_EVAL_MODEL", "gpt-5-mini").strip()
+            or "gpt-5-mini",
+            skill_timeout_seconds=int(env.get("AIEQ_SKILL_TIMEOUT_SECONDS", "120")),
         )
 
     def subprocess_env(self) -> dict[str, str]:
@@ -500,6 +517,17 @@ def doctor_report(
             f"Missing OPENAI_API_KEY for bridge model {config.method_bridge_model}."
         )
 
+    skill_provider = provider_for_model(config.skill_mutation_model)
+    skill_blockers: list[str] = []
+    if skill_provider != "openai":
+        skill_blockers.append(
+            f"Only OpenAI-backed skill optimization is implemented; got {config.skill_mutation_model}."
+        )
+    if not key_presence["OPENAI_API_KEY"]:
+        skill_blockers.append(
+            f"Missing OPENAI_API_KEY for skill optimization model {config.skill_mutation_model}."
+        )
+
     def denario_capability(model_name: str, *, action: str) -> dict[str, Any]:
         blocked_by: list[str] = []
         provider = provider_for_model(model_name)
@@ -562,6 +590,34 @@ def doctor_report(
                 "provider": method_bridge_provider,
             },
         },
+        "design_mutation": {
+            "action": "design_mutation",
+            "executor": "skill_optimizer",
+            "available": not skill_blockers,
+            "blocked_by": skill_blockers,
+            "model": config.skill_mutation_model,
+            "provider": skill_provider,
+        },
+        "run_eval": {
+            "action": "run_eval",
+            "executor": "skill_optimizer",
+            "available": not skill_blockers,
+            "blocked_by": skill_blockers,
+            "model": config.skill_eval_model,
+            "provider": provider_for_model(config.skill_eval_model),
+        },
+        "promote_winner": {
+            "action": "promote_winner",
+            "executor": "skill_optimizer",
+            "available": True,
+            "blocked_by": [],
+        },
+        "analyze_failure": {
+            "action": "analyze_failure",
+            "executor": "skill_optimizer",
+            "available": True,
+            "blocked_by": [],
+        },
         "manual_only": {
             "action": "manual_only",
             "executor": "manual",
@@ -594,6 +650,9 @@ def doctor_report(
             "default_autoresearch_branch": config.default_autoresearch_branch,
             "autoresearch_remote_host": config.autoresearch_remote_host,
             "autoresearch_remote_repo": config.autoresearch_remote_repo,
+            "skill_mutation_model": config.skill_mutation_model,
+            "skill_review_model": config.skill_review_model,
+            "skill_eval_model": config.skill_eval_model,
         },
         "tools": {
             "uv": {"available": bool(uv_path), "path": uv_path},

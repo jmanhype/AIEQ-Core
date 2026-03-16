@@ -20,6 +20,7 @@ from .method_bridge import (
     MethodBridgeReview,
     OpenAIMethodBridge,
 )
+from .modes import default_mode_registry
 from .models import ActionProposal, ActionType, ExecutionStatus, serialize_dataclass
 from .runtime import RuntimeConfig, capability_key_for_action, doctor_report
 
@@ -61,9 +62,31 @@ class ResearchOrchestrator:
     ) -> None:
         self.config = config or RuntimeConfig.load()
         self.command_runner = command_runner or self._default_command_runner
+        self.mode_registry = default_mode_registry()
 
-    def doctor(self, *, ledger_path: str | Path | None = None) -> dict[str, Any]:
-        return doctor_report(self.config, ledger_path=ledger_path)
+    def doctor(
+        self,
+        *,
+        ledger_path: str | Path | None = None,
+        mode: str = "",
+    ) -> dict[str, Any]:
+        if mode:
+            return self.mode_registry.get(mode).doctor(
+                config=self.config,
+                ledger_path=str(ledger_path) if ledger_path is not None else None,
+            )
+
+        payload = doctor_report(self.config, ledger_path=ledger_path)
+        payload["modes"] = [serialize_dataclass(item) for item in self.mode_registry.list_modes()]
+        payload["mode_reports"] = {
+            descriptor.name: self.mode_registry.get(descriptor.name).doctor(
+                config=self.config,
+                ledger_path=str(ledger_path) if ledger_path is not None else None,
+            )
+            for descriptor in self.mode_registry.list_modes()
+            if descriptor.name != "ml_research"
+        }
+        return payload
 
     def run_next(
         self,
@@ -73,10 +96,15 @@ class ResearchOrchestrator:
         dry_run: bool = False,
         data_description: str = "",
         data_description_file: str = "",
+        mode: str = "",
     ) -> dict[str, Any]:
         self.config.ensure_runtime_dirs()
         ledger = EpistemicLedger.load(ledger_path)
-        decision = ResearchController().decide(ledger, backlog_limit=backlog_limit)
+        decision = ResearchController(mode_registry=self.mode_registry).decide(
+            ledger,
+            backlog_limit=backlog_limit,
+            mode_hint=mode,
+        )
         payload: dict[str, Any] = {
             "ok": True,
             "decision": serialize_dataclass(decision),
@@ -84,7 +112,7 @@ class ResearchOrchestrator:
 
         if dry_run:
             payload["mode"] = "dry_run"
-            payload["doctor"] = self.doctor(ledger_path=ledger_path)
+            payload["doctor"] = self.doctor(ledger_path=ledger_path, mode=mode)
             return payload
 
         decision_record = ledger.record_decision(
@@ -94,6 +122,7 @@ class ResearchOrchestrator:
                 "summary": decision.summary,
                 "backlog": [serialize_dataclass(item) for item in decision.backlog],
                 "runner": "orchestrator",
+                "mode": decision.primary_action.mode or mode,
             },
         )
         payload["decision_record"] = serialize_dataclass(decision_record)
@@ -105,6 +134,7 @@ class ResearchOrchestrator:
                 decision_id=decision_record.id,
                 data_description=data_description,
                 data_description_file=data_description_file,
+                mode_hint=mode,
             )
             payload["result"] = result
             payload["ok"] = bool(result.get("ok", True))
@@ -129,7 +159,11 @@ class ResearchOrchestrator:
             payload["execution"] = serialize_dataclass(execution)
 
         payload["follow_up_decision"] = serialize_dataclass(
-            ResearchController().decide(ledger, backlog_limit=backlog_limit)
+            ResearchController(mode_registry=self.mode_registry).decide(
+                ledger,
+                backlog_limit=backlog_limit,
+                mode_hint=mode,
+            )
         )
         return payload
 
@@ -141,51 +175,25 @@ class ResearchOrchestrator:
         decision_id: str,
         data_description: str,
         data_description_file: str,
+        mode_hint: str,
     ) -> dict[str, Any]:
-        capability = self.doctor().get("capabilities", {}).get(
-            capability_key_for_action(proposal.action_type),
-            {},
+        if proposal.claim_id:
+            claim = ledger.get_claim(proposal.claim_id)
+            adapter = self.mode_registry.for_claim(claim)
+        else:
+            adapter = self.mode_registry.get(proposal.mode or mode_hint or "ml_research")
+        return adapter.execute_action(
+            orchestrator=self,
+            ledger=ledger,
+            proposal=proposal,
+            decision_id=decision_id,
+            data_description=data_description,
+            data_description_file=data_description_file,
         )
-        if capability_key_for_action(proposal.action_type) == "manual_only":
-            raise UnsupportedAutomatedActionError(
-                f"{proposal.action_type.value} is not automated yet."
-            )
-        if not capability.get("available", False):
-            blockers = capability.get("blocked_by", [])
-            raise UnsupportedAutomatedActionError(
-                f"{proposal.action_type.value} is blocked: {' '.join(blockers)}"
-            )
 
-        if proposal.action_type == ActionType.GENERATE_IDEA:
-            return self._execute_generate_idea(
-                ledger=ledger,
-                proposal=proposal,
-                decision_id=decision_id,
-                data_description=data_description,
-                data_description_file=data_description_file,
-            )
-        if proposal.action_type == ActionType.GENERATE_METHOD:
-            return self._execute_generate_method(
-                ledger=ledger,
-                proposal=proposal,
-                decision_id=decision_id,
-            )
-        if proposal.action_type == ActionType.SYNTHESIZE_PAPER:
-            return self._execute_synthesize_paper(
-                ledger=ledger,
-                proposal=proposal,
-                decision_id=decision_id,
-            )
-        if proposal.action_type in {ActionType.RUN_EXPERIMENT, ActionType.REPRODUCE_RESULT}:
-            return self._execute_autoresearch(
-                ledger=ledger,
-                proposal=proposal,
-                decision_id=decision_id,
-            )
-
-        raise UnsupportedAutomatedActionError(
-            f"{proposal.action_type.value} is not automated in the current execution plane."
-        )
+    @staticmethod
+    def unsupported_action_error(message: str) -> UnsupportedAutomatedActionError:
+        return UnsupportedAutomatedActionError(message)
 
     def _execute_generate_idea(
         self,

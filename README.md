@@ -4,9 +4,21 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/jmanhype/AIEQ-Core/blob/main/LICENSE)
 [![Python 3.10%2B](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://github.com/jmanhype/AIEQ-Core/blob/main/pyproject.toml)
 
-AIEQ-Core is the orchestration and memory layer for an automated research
-system designed to generate, test, write up, and stress-test unconventional
-scientific hypotheses.
+AIEQ-Core is the orchestration and memory layer for an automated **innovation
+engine**. It can generate hypotheses, mutate artifacts, run evals, retain
+winners, critique conclusions, and compound knowledge over time.
+
+Today the repo ships in two layers:
+
+- a **generic innovation kernel**
+- built-in **modes** on top of that kernel
+
+The current built-in modes are:
+
+- `ml_research`
+  - the existing Denario + `autoresearch` scientific/ML lab
+- `skill_optimizer`
+  - prompt and `SKILL.md`-style optimization against explicit eval suites
 
 The name comes from **Axiomatic Inversion & Epistemic Quarantine**:
 
@@ -33,54 +45,63 @@ That is the piece that makes the system compounding rather than stateless.
 
 ## Project intent
 
-The broader concept is still a hybrid research engine:
+The broader concept is a hybrid innovation engine:
 
 1. **Brain**: generate hypotheses using AIEQ-style inversion and quarantine
    rules.
-2. **Hands**: run rapid experiments to evaluate whether those hypotheses hold
-   up empirically.
-3. **Mouth**: synthesize validated results into a structured scientific writeup.
-4. **Critic**: attack the hypothesis, methods, and paper before a human reviews
-   it.
+2. **Hands**: mutate the thing being improved and evaluate it against explicit
+   metrics or test suites.
+3. **Mouth**: synthesize validated results into structured artifacts or
+   reports.
+4. **Critic**: attack the hypothesis, mutation, or conclusions before a human
+   reviews it.
 
 In other words, this repository is not meant to be just another auto-research
-loop. It is intended to be the coordination core for a research pipeline that
-explicitly searches for ideas outside the current local optimum.
+loop. It is intended to be the coordination core for an iterative system that
+explicitly searches for ideas outside the current local optimum and then tests
+them.
 
-## Proposed system shape
+## Modes
 
-- `hypothesis engine`
-  - Generates candidate claims by modifying assumptions, constraints, or priors.
-- `experiment runner`
-  - Sends candidates to downstream evaluation and training workflows.
-- `paper synthesis`
-  - Converts validated runs into structured research artifacts.
-- `adversarial review`
-  - Red-teams claims, methods, and evidence before publication or handoff.
+### `ml_research`
+
+- Denario generates ideas, methods, critique, and paper artifacts
+- `autoresearch` runs bounded GPU experiments
+- the method bridge rewrites `train.py` for one guarded run at a time
+
+### `skill_optimizer`
+
+- the target is a prompt or `SKILL.md`-like artifact
+- an LLM mutates the artifact under invariant constraints
+- the candidate is reviewed before evaluation
+- repeated eval cases score the candidate across a distribution of runs
+- the best candidate can be promoted without overwriting the original source by default
 
 ## What exists now
 
-The repo now contains the first concrete subsystem:
+The repo now contains both the reusable kernel and the first mode split:
 
 - `src/aieq_core/models.py`
-  - typed schema for claims, assumptions, evidence, attacks, artifacts, and ranked actions
+  - typed schema for claims, assumptions, evidence, attacks, artifacts, ranked actions, and generic optimization entities such as targets, eval suites, mutation candidates, and eval runs
 - `src/aieq_core/ledger.py`
   - persistent JSON ledger with derived belief/status updates
-  - now includes first-class artifact nodes for methods and papers
+  - now includes first-class optimization targets, mutation candidates, eval suites, eval runs, and existing method/paper artifacts
 - `src/aieq_core/policy.py`
   - action ranking based on expected information gain
+- `src/aieq_core/modes/`
+  - pluggable mode layer for `ml_research` and `skill_optimizer`
 - `src/aieq_core/adapters/autoresearch.py`
   - adapter that parses `autoresearch` run logs and aggregate `results.tsv` histories into ledger evidence plus controller-facing series metrics
 - `src/aieq_core/adapters/denario.py`
   - adapter that imports Denario project directories into claims, evidence, attacks, method artifacts, and paper artifacts
 - `src/aieq_core/controller.py`
-  - controller that chooses between generation, experimentation, critique, reproduction, and synthesis
+  - controller that chooses between mode-specific next actions while keeping shared decision/execution history
 - `src/aieq_core/runtime.py`
   - unified runtime config, provider-key detection, and capability diagnostics
 - `src/aieq_core/orchestrator.py`
-  - guarded execution layer that can launch supported Denario and `autoresearch` actions from this repo
+  - guarded execution layer that routes through the active mode adapter
 - `src/aieq_core/cli.py`
-  - CLI for ledger operations, diagnostics, and single-entrypoint execution
+  - CLI for ledger operations, mode-aware diagnostics, target/eval registration, and single-entrypoint execution
 - `docs/architecture.md`
   - architectural rationale and integration boundaries
 - `external/autoresearch`
@@ -108,7 +129,13 @@ is in [`examples/demo/README.md`](/Users/speed/AIEQ-Core/examples/demo/README.md
 ## Single entrypoint
 
 `AIEQ-Core` can now act as the command surface for the supported external
-systems instead of only telling you what to run next.
+systems and optimization modes instead of only telling you what to run next.
+
+List the registered modes:
+
+```bash
+PYTHONPATH=src python -m aieq_core.cli mode list
+```
 
 The current execution plane automates:
 
@@ -116,6 +143,7 @@ The current execution plane automates:
 - `generate_method` via Denario
 - `synthesize_paper` via Denario
 - `run_experiment` and `reproduce_result` via `autoresearch`
+- `design_mutation`, `run_eval`, `analyze_failure`, and `promote_winner` for `skill_optimizer`
 
 It does this without collapsing the upstream repos into one monolith:
 
@@ -146,6 +174,12 @@ Inspect readiness from this repo:
 PYTHONPATH=src python -m aieq_core.cli doctor
 ```
 
+Inspect readiness for one mode only:
+
+```bash
+PYTHONPATH=src python -m aieq_core.cli doctor --mode skill_optimizer
+```
+
 If you already have a ledger, you can ask whether the current next action is
 actually runnable on this machine:
 
@@ -157,6 +191,7 @@ Then let AIEQ-Core decide and execute one supported step:
 
 ```bash
 PYTHONPATH=src python -m aieq_core.cli run-next data/ledger.json \
+  --mode ml_research \
   --data-description-file /absolute/path/to/data_description.md
 ```
 
@@ -205,6 +240,42 @@ for:
 
 And `run-next` will execute `autoresearch` over SSH while still importing the
 run log and series rollup back into the local ledger.
+
+### Skill optimizer quick start
+
+Register a prompt-like target:
+
+```bash
+PYTHONPATH=src python -m aieq_core.cli target register data/ledger.json \
+  --mode skill_optimizer \
+  --title "Support reply skill" \
+  --source-file examples/skill_optimizer/support-skill.md
+```
+
+Register an eval suite from JSON:
+
+```bash
+PYTHONPATH=src python -m aieq_core.cli eval register data/ledger.json \
+  --mode skill_optimizer \
+  --claim-id <claim-id> \
+  --target-id <target-id> \
+  --suite-file examples/skill_optimizer/eval-suite.json
+```
+
+Then run the loop:
+
+```bash
+PYTHONPATH=src python -m aieq_core.cli run-loop data/ledger.json \
+  --mode skill_optimizer \
+  --iterations 3
+```
+
+Or promote the current best evaluated candidate:
+
+```bash
+PYTHONPATH=src python -m aieq_core.cli promote-winner data/ledger.json \
+  --claim-id <claim-id>
+```
 
 ## Quick start
 

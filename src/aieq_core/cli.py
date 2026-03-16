@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 from typing import Sequence
 
 from .adapters.autoresearch import AutoresearchAdapter
 from .adapters.denario import DenarioAdapter
 from .controller import ResearchController
 from .ledger import EpistemicLedger
+from .modes import default_mode_registry
+from .modes.skill_optimizer import SkillOptimizerMode
 from .models import (
     ActionExecutor,
     ActionType,
@@ -24,6 +27,36 @@ from .runtime import RuntimeConfig
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aieq-core")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    mode_parser = subparsers.add_parser("mode", help="Inspect registered innovation modes")
+    mode_subparsers = mode_parser.add_subparsers(dest="mode_command", required=True)
+    mode_subparsers.add_parser("list", help="List available modes")
+
+    target_parser = subparsers.add_parser("target", help="Manage optimization targets")
+    target_subparsers = target_parser.add_subparsers(dest="target_command", required=True)
+    target_register = target_subparsers.add_parser("register", help="Register a mutable target")
+    target_register.add_argument("ledger", help="Path to the ledger JSON file")
+    target_register.add_argument("--mode", required=True)
+    target_register.add_argument("--title", required=True)
+    target_register.add_argument("--statement", default="")
+    target_register.add_argument("--claim-id", default="")
+    target_register.add_argument("--target-type", default="prompt_template")
+    target_register.add_argument("--source-file", default="")
+    target_register.add_argument("--content", default="")
+    target_register.add_argument("--mutable-field", action="append", default=[])
+    target_register.add_argument("--constraint-file", default="")
+    target_register.add_argument("--novelty", type=float, default=0.6)
+    target_register.add_argument("--falsifiability", type=float, default=0.7)
+    target_register.add_argument("--tag", action="append", default=[])
+
+    eval_parser = subparsers.add_parser("eval", help="Manage eval suites")
+    eval_subparsers = eval_parser.add_subparsers(dest="eval_command", required=True)
+    eval_register = eval_subparsers.add_parser("register", help="Register an eval suite")
+    eval_register.add_argument("ledger", help="Path to the ledger JSON file")
+    eval_register.add_argument("--mode", required=True)
+    eval_register.add_argument("--claim-id", required=True)
+    eval_register.add_argument("--target-id", required=True)
+    eval_register.add_argument("--suite-file", required=True)
 
     init_parser = subparsers.add_parser("init", help="Create an empty ledger file")
     init_parser.add_argument("ledger", help="Path to the ledger JSON file")
@@ -82,6 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rank_parser.add_argument("ledger", help="Path to the ledger JSON file")
     rank_parser.add_argument("--limit", type=int, default=10)
+    rank_parser.add_argument("--mode", default="")
 
     import_autoresearch = subparsers.add_parser(
         "import-autoresearch-run",
@@ -150,6 +184,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     decide_parser.add_argument("ledger", help="Path to the ledger JSON file")
     decide_parser.add_argument("--backlog-limit", type=int, default=5)
+    decide_parser.add_argument("--mode", default="")
     decide_parser.add_argument(
         "--record",
         action="store_true",
@@ -161,6 +196,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Inspect runtime readiness for Denario/autoresearch execution from this repo",
     )
     doctor_parser.add_argument("--ledger", default="")
+    doctor_parser.add_argument("--mode", default="")
     doctor_parser.add_argument("--env-file", default="")
 
     run_next_parser = subparsers.add_parser(
@@ -168,11 +204,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Decide and execute the next supported action from this repo",
     )
     run_next_parser.add_argument("ledger", help="Path to the ledger JSON file")
+    run_next_parser.add_argument("--mode", default="")
     run_next_parser.add_argument("--backlog-limit", type=int, default=5)
     run_next_parser.add_argument("--dry-run", action="store_true")
     run_next_parser.add_argument("--data-description", default="")
     run_next_parser.add_argument("--data-description-file", default="")
     run_next_parser.add_argument("--env-file", default="")
+
+    run_loop_parser = subparsers.add_parser(
+        "run-loop",
+        help="Run multiple run-next iterations against the same ledger",
+    )
+    run_loop_parser.add_argument("ledger", help="Path to the ledger JSON file")
+    run_loop_parser.add_argument("--mode", default="")
+    run_loop_parser.add_argument("--iterations", type=int, default=3)
+    run_loop_parser.add_argument("--backlog-limit", type=int, default=5)
+    run_loop_parser.add_argument("--data-description", default="")
+    run_loop_parser.add_argument("--data-description-file", default="")
+    run_loop_parser.add_argument("--env-file", default="")
+
+    promote_parser = subparsers.add_parser(
+        "promote-winner",
+        help="Promote the best evaluated candidate for a skill-optimizer claim",
+    )
+    promote_parser.add_argument("ledger", help="Path to the ledger JSON file")
+    promote_parser.add_argument("--claim-id", required=True)
 
     execution_parser = subparsers.add_parser(
         "record-execution",
@@ -191,6 +247,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[item.value for item in ActionExecutor],
         default=ActionExecutor.MANUAL.value,
     )
+    execution_parser.add_argument("--mode", default="")
     execution_parser.add_argument(
         "--status",
         choices=[item.value for item in ExecutionStatus],
@@ -209,6 +266,88 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    if args.command == "mode":
+        registry = default_mode_registry()
+        if args.mode_command == "list":
+            _emit({"modes": [serialize_dataclass(item) for item in registry.list_modes()]})
+            return 0
+
+    if args.command == "target":
+        ledger = EpistemicLedger.load(args.ledger)
+        if args.target_command == "register":
+            if args.mode != "skill_optimizer":
+                parser.error("target register currently supports --mode skill_optimizer only.")
+            content = _resolve_content(source_file=args.source_file, content=args.content)
+            constraints = _load_json_file(args.constraint_file) if args.constraint_file else {}
+            claim = (
+                ledger.get_claim(args.claim_id)
+                if args.claim_id
+                else ledger.add_claim(
+                    title=args.title,
+                    statement=args.statement
+                    or f"Optimize `{args.title}` against the registered eval suite.",
+                    novelty=args.novelty,
+                    falsifiability=args.falsifiability,
+                    tags=args.tag,
+                    metadata={"mode": args.mode},
+                )
+            )
+            claim.metadata["mode"] = args.mode
+            ledger.save()
+            target = ledger.register_target(
+                claim_id=claim.id,
+                mode=args.mode,
+                target_type=args.target_type,
+                title=args.title,
+                content=content,
+                source_type="file" if args.source_file else "inline",
+                source_path=str(Path(args.source_file).expanduser().resolve()) if args.source_file else "",
+                mutable_fields=args.mutable_field,
+                invariant_constraints=constraints,
+            )
+            _emit({"claim": serialize_dataclass(claim), "target": serialize_dataclass(target)})
+            return 0
+
+    if args.command == "eval":
+        ledger = EpistemicLedger.load(args.ledger)
+        if args.eval_command == "register":
+            if args.mode != "skill_optimizer":
+                parser.error("eval register currently supports --mode skill_optimizer only.")
+            suite_payload = _load_json_file(args.suite_file)
+            suite = ledger.register_eval_suite(
+                claim_id=args.claim_id,
+                target_id=args.target_id,
+                name=str(suite_payload.get("name", "eval-suite")).strip() or "eval-suite",
+                compatible_target_type=str(
+                    suite_payload.get("compatible_target_type", "prompt_template")
+                ).strip()
+                or "prompt_template",
+                scoring_method=str(suite_payload.get("scoring_method", "binary")).strip() or "binary",
+                aggregation=str(suite_payload.get("aggregation", "average")).strip() or "average",
+                pass_threshold=float(suite_payload.get("pass_threshold", 1.0)),
+                repetitions=int(suite_payload.get("repetitions", 1)),
+                cases=list(suite_payload.get("cases", [])),
+                metadata={
+                    key: value
+                    for key, value in suite_payload.items()
+                    if key
+                    not in {
+                        "name",
+                        "compatible_target_type",
+                        "scoring_method",
+                        "aggregation",
+                        "pass_threshold",
+                        "repetitions",
+                        "cases",
+                    }
+                },
+            )
+            claim = ledger.get_claim(args.claim_id)
+            claim.metadata["mode"] = args.mode
+            ledger.save()
+            _emit({"eval_suite": serialize_dataclass(suite)})
+            return 0
+
     if args.command == "init":
         ledger = EpistemicLedger.load(args.ledger)
         ledger.save()
@@ -218,7 +357,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "doctor":
         config = RuntimeConfig.load(env_file=args.env_file or None)
         orchestrator = ResearchOrchestrator(config=config)
-        payload = orchestrator.doctor(ledger_path=args.ledger or None)
+        payload = orchestrator.doctor(ledger_path=args.ledger or None, mode=args.mode)
         _emit(payload)
         return 0
 
@@ -231,9 +370,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             dry_run=args.dry_run,
             data_description=args.data_description,
             data_description_file=args.data_description_file,
+            mode=args.mode,
         )
         _emit(payload)
         return 0 if payload.get("ok", True) else 1
+
+    if args.command == "run-loop":
+        config = RuntimeConfig.load(env_file=args.env_file or None)
+        orchestrator = ResearchOrchestrator(config=config)
+        runs = []
+        final_ok = True
+        for _ in range(max(1, args.iterations)):
+            payload = orchestrator.run_next(
+                args.ledger,
+                backlog_limit=args.backlog_limit,
+                dry_run=False,
+                data_description=args.data_description,
+                data_description_file=args.data_description_file,
+                mode=args.mode,
+            )
+            runs.append(payload)
+            final_ok = final_ok and bool(payload.get("ok", True))
+        _emit({"iterations": len(runs), "ok": final_ok, "runs": runs})
+        return 0 if final_ok else 1
 
     ledger = EpistemicLedger.load(args.ledger)
 
@@ -294,9 +453,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "rank-actions":
-        policy = ExpectedInformationGainPolicy()
-        proposals = policy.rank_actions(ledger, limit=args.limit)
-        _emit({"actions": [serialize_dataclass(item) for item in proposals]})
+        decision = ResearchController().decide(
+            ledger,
+            backlog_limit=args.limit,
+            mode_hint=args.mode,
+        )
+        _emit(
+            {
+                "actions": [
+                    serialize_dataclass(item)
+                    for item in [decision.primary_action, *decision.backlog][: args.limit]
+                ]
+            }
+        )
         return 0
 
     if args.command == "import-autoresearch-run":
@@ -361,6 +530,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         decision = ResearchController().decide(
             ledger,
             backlog_limit=args.backlog_limit,
+            mode_hint=args.mode,
         )
         payload = {"decision": serialize_dataclass(decision)}
         if args.record:
@@ -383,6 +553,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             claim_title=args.claim_title,
             action_type=args.action_type,
             executor=args.executor,
+            mode=args.mode,
             status=args.status,
             notes=args.notes,
             runtime_seconds=args.runtime_seconds,
@@ -393,8 +564,38 @@ def main(argv: Sequence[str] | None = None) -> int:
         _emit(serialize_dataclass(execution))
         return 0
 
+    if args.command == "promote-winner":
+        claim = ledger.get_claim(args.claim_id)
+        if str(claim.metadata.get("mode", "")).strip() != "skill_optimizer":
+            parser.error("promote-winner currently supports skill_optimizer claims only.")
+        mode = SkillOptimizerMode()
+        target = mode._latest_target(ledger=ledger, claim_id=claim.id)
+        best = mode._best_candidate(ledger=ledger, claim_id=claim.id, target_id=target.id)
+        if best is None:
+            parser.error("No evaluated candidate exists for this claim.")
+        ledger.promote_candidate(target_id=target.id, candidate_id=best["candidate"].id)
+        _emit(
+            {
+                "claim_id": claim.id,
+                "target_id": target.id,
+                "promoted_candidate_id": best["candidate"].id,
+                "aggregate_score": round(best["score"], 6),
+            }
+        )
+        return 0
+
     parser.error(f"Unhandled command: {args.command}")
     return 2
+
+
+def _resolve_content(*, source_file: str, content: str) -> str:
+    if source_file:
+        return Path(source_file).expanduser().read_text(encoding="utf-8")
+    return content
+
+
+def _load_json_file(path: str) -> dict[str, object]:
+    return json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
 
 
 def _emit(payload: object) -> None:

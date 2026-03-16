@@ -16,6 +16,7 @@ from aieq_core.models import (
     ClaimStatus,
     EvidenceDirection,
     ExecutionStatus,
+    canonical_action_type,
 )
 from aieq_core.policy import ExpectedInformationGainPolicy
 
@@ -229,6 +230,102 @@ class EpistemicLedgerTests(unittest.TestCase):
                 metrics["autoresearch_series_average_memory_gb"],
                 44.3,
             )
+
+    def test_generic_target_eval_candidate_roundtrip_and_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger_path = Path(tmpdir) / "ledger.json"
+            ledger = EpistemicLedger.load(ledger_path)
+            claim = ledger.add_claim(
+                title="Optimize a support skill",
+                statement="The prompt should become more reliable against its eval suite.",
+                metadata={"mode": "skill_optimizer"},
+            )
+            target = ledger.register_target(
+                claim_id=claim.id,
+                mode="skill_optimizer",
+                target_type="prompt_template",
+                title="Support prompt",
+                content="Answer the user clearly.",
+                invariant_constraints={"required_phrases": ["Answer"]},
+            )
+            suite = ledger.register_eval_suite(
+                claim_id=claim.id,
+                target_id=target.id,
+                name="clarity-suite",
+                compatible_target_type="prompt_template",
+                pass_threshold=0.75,
+                repetitions=2,
+                cases=[
+                    {
+                        "id": "case-1",
+                        "input": "Explain the refund policy.",
+                        "criteria": [{"type": "contains_all", "values": ["refund", "policy"]}],
+                    }
+                ],
+            )
+            candidate = ledger.add_mutation_candidate(
+                claim_id=claim.id,
+                target_id=target.id,
+                summary="Tightened instruction ordering.",
+                content="Answer the user clearly and mention the refund policy when relevant.",
+                review_status="approved",
+            )
+            ledger.record_eval_run(
+                claim_id=claim.id,
+                target_id=target.id,
+                suite_id=suite.id,
+                candidate_id=candidate.id,
+                case_id="case-1",
+                run_index=1,
+                score=1.0,
+                passed=True,
+                raw_output="Refund policy details.",
+            )
+            ledger.record_eval_run(
+                claim_id=claim.id,
+                target_id=target.id,
+                suite_id=suite.id,
+                candidate_id=candidate.id,
+                case_id="case-1",
+                run_index=2,
+                score=0.5,
+                passed=False,
+                raw_output="Policy details.",
+            )
+            ledger.promote_candidate(target_id=target.id, candidate_id=candidate.id)
+
+            snapshot = EpistemicLedger.load(ledger_path).claim_snapshot(claim.id)
+            metrics = snapshot["metrics"]
+
+            self.assertEqual(metrics["target_count"], 1)
+            self.assertEqual(metrics["eval_suite_count"], 1)
+            self.assertEqual(metrics["mutation_candidate_count"], 1)
+            self.assertEqual(metrics["eval_run_count"], 2)
+            self.assertEqual(metrics["approved_candidate_count"], 1)
+            self.assertEqual(metrics["promoted_candidate_count"], 1)
+            self.assertEqual(metrics["optimization_best_candidate_id"], candidate.id)
+            self.assertAlmostEqual(metrics["optimization_best_score"], 0.75)
+            self.assertAlmostEqual(metrics["optimization_average_pass_rate"], 0.5)
+            self.assertTrue(metrics["optimization_threshold_met"])
+            self.assertEqual(snapshot["targets"][0]["promoted_candidate_id"], candidate.id)
+
+    def test_legacy_actions_map_to_generic_actions(self) -> None:
+        self.assertEqual(
+            canonical_action_type(ActionType.GENERATE_IDEA),
+            ActionType.PROPOSE_HYPOTHESIS,
+        )
+        self.assertEqual(
+            canonical_action_type(ActionType.GENERATE_METHOD),
+            ActionType.DESIGN_MUTATION,
+        )
+        self.assertEqual(
+            canonical_action_type(ActionType.RUN_EXPERIMENT),
+            ActionType.RUN_EVAL,
+        )
+        self.assertEqual(
+            canonical_action_type(ActionType.SYNTHESIZE_PAPER),
+            ActionType.SYNTHESIZE_REPORT,
+        )
 
 
 if __name__ == "__main__":

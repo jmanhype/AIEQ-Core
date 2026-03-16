@@ -277,6 +277,102 @@ class ResearchControllerTests(unittest.TestCase):
             self.assertIn(str(radical_results), experiment_action.command_hint)
             self.assertIn("--branch radical", experiment_action.command_hint)
 
+    def test_skill_optimizer_claim_without_candidate_prefers_design_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = EpistemicLedger.load(Path(tmpdir) / "ledger.json")
+            claim = ledger.add_claim(
+                title="Optimize support skill",
+                statement="Improve the support prompt against its eval suite.",
+                novelty=0.8,
+                falsifiability=0.7,
+                metadata={"mode": "skill_optimizer"},
+            )
+            target = ledger.register_target(
+                claim_id=claim.id,
+                mode="skill_optimizer",
+                target_type="prompt_template",
+                title="Support skill",
+                content="Answer clearly.",
+            )
+            ledger.register_eval_suite(
+                claim_id=claim.id,
+                target_id=target.id,
+                name="support-suite",
+                compatible_target_type="prompt_template",
+                pass_threshold=0.75,
+                cases=[
+                    {
+                        "id": "case-1",
+                        "input": "How do refunds work?",
+                        "criteria": [{"type": "contains_all", "values": ["refund"]}],
+                    }
+                ],
+            )
+
+            decision = ResearchController().decide(ledger)
+
+            self.assertEqual(decision.primary_action.claim_id, claim.id)
+            self.assertEqual(decision.primary_action.action_type.value, "design_mutation")
+            self.assertEqual(decision.primary_action.executor.value, "skill_optimizer")
+
+    def test_skill_optimizer_approved_candidate_prefers_run_eval_then_promote(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = EpistemicLedger.load(Path(tmpdir) / "ledger.json")
+            claim = ledger.add_claim(
+                title="Optimize onboarding prompt",
+                statement="Improve the onboarding prompt against its eval suite.",
+                novelty=0.7,
+                falsifiability=0.8,
+                metadata={"mode": "skill_optimizer"},
+            )
+            target = ledger.register_target(
+                claim_id=claim.id,
+                mode="skill_optimizer",
+                target_type="prompt_template",
+                title="Onboarding prompt",
+                content="Be helpful.",
+            )
+            suite = ledger.register_eval_suite(
+                claim_id=claim.id,
+                target_id=target.id,
+                name="onboarding-suite",
+                compatible_target_type="prompt_template",
+                pass_threshold=0.7,
+                repetitions=1,
+                cases=[
+                    {
+                        "id": "case-1",
+                        "input": "Explain setup.",
+                        "criteria": [{"type": "contains_all", "values": ["setup"]}],
+                    }
+                ],
+            )
+            candidate = ledger.add_mutation_candidate(
+                claim_id=claim.id,
+                target_id=target.id,
+                summary="Add setup focus.",
+                content="Explain setup clearly.",
+                review_status="approved",
+            )
+
+            decision = ResearchController().decide(ledger)
+            self.assertEqual(decision.primary_action.action_type.value, "run_eval")
+
+            ledger.record_eval_run(
+                claim_id=claim.id,
+                target_id=target.id,
+                suite_id=suite.id,
+                candidate_id=candidate.id,
+                case_id="case-1",
+                run_index=1,
+                score=1.0,
+                passed=True,
+                raw_output="Setup instructions.",
+            )
+
+            follow_up = ResearchController().decide(ledger)
+            self.assertEqual(follow_up.primary_action.action_type.value, "promote_winner")
+
 
 if __name__ == "__main__":
     unittest.main()

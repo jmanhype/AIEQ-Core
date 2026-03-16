@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from .ledger import EpistemicLedger
+from .modes import default_mode_registry
 from .models import (
     ActionExecutor,
     ActionProposal,
@@ -13,6 +14,7 @@ from .models import (
     ClaimStatus,
     ControllerDecision,
     ExecutionStatus,
+    action_matches,
     clamp,
 )
 from .policy import ExpectedInformationGainPolicy
@@ -21,32 +23,43 @@ from .policy import ExpectedInformationGainPolicy
 class ResearchController:
     """Chooses the next research move from the current ledger state."""
 
-    def __init__(self, policy: ExpectedInformationGainPolicy | None = None) -> None:
+    def __init__(
+        self,
+        policy: ExpectedInformationGainPolicy | None = None,
+        *,
+        mode_registry: Any | None = None,
+        default_mode: str = "ml_research",
+    ) -> None:
         self.policy = policy or ExpectedInformationGainPolicy()
+        self.mode_registry = mode_registry or default_mode_registry()
+        self.default_mode = default_mode
 
     def decide(
-        self, ledger: EpistemicLedger, *, backlog_limit: int = 5
+        self,
+        ledger: EpistemicLedger,
+        *,
+        backlog_limit: int = 5,
+        mode_hint: str = "",
     ) -> ControllerDecision:
         claims = [claim for claim in ledger.list_claims() if claim.status != ClaimStatus.ARCHIVED]
         if not claims:
-            primary = ActionProposal(
-                claim_id="",
-                claim_title="ledger bootstrap",
-                action_type=ActionType.GENERATE_IDEA,
-                expected_information_gain=1.0,
-                priority="now",
-                reason=(
-                    "The ledger is empty. The highest-leverage move is to generate the first "
-                    "candidate claim and import it into the graph."
-                ),
-                executor=ActionExecutor.DENARIO,
-                stage="bootstrap",
-                command_hint=(
-                    f"Run Denario to create a project, then import it with: "
-                    f"PYTHONPATH=src python -m aieq_core.cli import-denario-project "
-                    f"{ledger.path} --project-dir <denario-project-dir>"
-                ),
-            )
+            adapter = self.mode_registry.get(mode_hint or self.default_mode)
+            primary = adapter.bootstrap_proposal(ledger=ledger)
+            if primary is None:
+                primary = ActionProposal(
+                    claim_id="",
+                    claim_title="ledger bootstrap",
+                    action_type=ActionType.PROPOSE_HYPOTHESIS,
+                    expected_information_gain=1.0,
+                    priority="now",
+                    reason="The ledger is empty and needs its first target or claim.",
+                    executor=ActionExecutor.MANUAL,
+                    mode=mode_hint or self.default_mode,
+                    stage="bootstrap",
+                    command_hint=(
+                        "Register a target or import a project before asking the controller to run."
+                    ),
+                )
             return ControllerDecision(
                 queue_state="bootstrap",
                 summary="No claims exist yet, so the controller should bootstrap the graph.",
@@ -54,14 +67,31 @@ class ResearchController:
                 backlog=[],
             )
 
-        proposals = self._specialized_proposals(ledger, claims)
-        proposals.extend(self._enrich_policy_actions(ledger))
+        proposals: list[ActionProposal] = []
+        for claim in claims:
+            adapter = self.mode_registry.for_claim(claim)
+            proposals.extend(adapter.build_proposals(ledger=ledger, claim=claim))
         proposals = [self._apply_history_feedback(ledger, item) for item in proposals]
         ranked = sorted(
             proposals,
             key=lambda item: item.expected_information_gain,
             reverse=True,
         )
+
+        if not ranked:
+            primary = ActionProposal(
+                claim_id=claims[0].id,
+                claim_title=claims[0].title,
+                action_type=ActionType.ANALYZE_FAILURE,
+                expected_information_gain=0.5,
+                priority="next",
+                reason="No automated proposal is currently available for the active claims.",
+                executor=ActionExecutor.MANUAL,
+                mode=self.mode_registry.for_claim(claims[0]).name,
+                stage="analysis",
+                command_hint="Inspect the active claim and register the missing target, eval, or project context.",
+            )
+            ranked = [primary]
 
         primary = ranked[0]
         backlog = ranked[1:backlog_limit]
@@ -72,173 +102,6 @@ class ResearchController:
             primary_action=primary,
             backlog=backlog,
         )
-
-    def _specialized_proposals(
-        self, ledger: EpistemicLedger, claims: list[Claim]
-    ) -> list[ActionProposal]:
-        proposals: list[ActionProposal] = []
-        for claim in claims:
-            metrics = ledger.claim_metrics(claim.id)
-            denario_meta = self._denario_meta(claim)
-            artifacts = ledger.artifacts_for_claim(claim.id)
-            has_method = bool(
-                metrics["method_artifact_count"]
-                or str(denario_meta.get("method", "")).strip()
-                or any(item.kind == ArtifactKind.METHOD for item in artifacts)
-            )
-            has_project = bool(str(denario_meta.get("project_dir", "")).strip())
-            has_paper = bool(
-                metrics["paper_artifact_count"]
-                or denario_meta.get("paper_paths")
-                or any(item.kind == ArtifactKind.PAPER for item in artifacts)
-            )
-            evidence_count = metrics["evidence_count"]
-            support_score = metrics["support_score"]
-            uncertainty = metrics["uncertainty"]
-            attack_count = metrics["open_attack_count"]
-
-            if has_project and not has_method:
-                score = clamp(
-                    0.35 * claim.novelty
-                    + 0.25 * claim.falsifiability
-                    + 0.20 * uncertainty
-                    + 0.35
-                )
-                proposals.append(
-                    ActionProposal(
-                        claim_id=claim.id,
-                        claim_title=claim.title,
-                        action_type=ActionType.GENERATE_METHOD,
-                        expected_information_gain=score,
-                        priority=self._priority(score),
-                        reason=(
-                            "The claim has Denario project context but no method yet. "
-                            "Generating methodology is the bottleneck before running new tests."
-                        ),
-                        executor=ActionExecutor.DENARIO,
-                        stage="generation",
-                        command_hint=(
-                            f"Open the Denario project at {denario_meta['project_dir']}, run "
-                            f"`get_method()`, then re-import it with: PYTHONPATH=src python -m "
-                            f"aieq_core.cli import-denario-project {ledger.path} --project-dir "
-                            f"{denario_meta['project_dir']} --claim-id {claim.id}"
-                        ),
-                    )
-                )
-
-            if (
-                claim.status in {ClaimStatus.ACTIVE, ClaimStatus.SUPPORTED}
-                and evidence_count >= 2
-                and attack_count == 0
-                and support_score >= 0.8
-                and has_project
-            ):
-                score = clamp(
-                    0.40 * claim.confidence
-                    + 0.20 * claim.novelty
-                    + 0.20 * (1.0 - uncertainty)
-                    + 0.20 * (0.0 if has_paper else 1.0)
-                )
-                proposals.append(
-                    ActionProposal(
-                        claim_id=claim.id,
-                        claim_title=claim.title,
-                        action_type=ActionType.SYNTHESIZE_PAPER,
-                        expected_information_gain=score,
-                        priority=self._priority(score),
-                        reason=(
-                            "The claim is supported by multiple evidence records and has no open "
-                            "attacks, so synthesis is now higher value than more blind search."
-                        ),
-                        executor=ActionExecutor.DENARIO,
-                        stage="synthesis",
-                        command_hint=(
-                            f"Run Denario paper generation for {denario_meta['project_dir']}, "
-                            f"then re-import with: PYTHONPATH=src python -m aieq_core.cli "
-                            f"import-denario-project {ledger.path} --project-dir "
-                            f"{denario_meta['project_dir']} --claim-id {claim.id}"
-                        ),
-                    )
-                )
-
-        return proposals
-
-    def _enrich_policy_actions(self, ledger: EpistemicLedger) -> list[ActionProposal]:
-        enriched: list[ActionProposal] = []
-        for proposal in self.policy.rank_actions(ledger, limit=50):
-            claim = ledger.get_claim(proposal.claim_id)
-            metrics = ledger.claim_metrics(proposal.claim_id)
-            denario_meta = self._denario_meta(claim)
-            autoresearch_meta = self._autoresearch_meta(claim)
-            results_tsv_path = str(autoresearch_meta.get("results_tsv_path", "")).strip()
-            preferred_branch = str(autoresearch_meta.get("branch", "")).strip()
-            if proposal.action_type == ActionType.RUN_EXPERIMENT:
-                proposal.executor = ActionExecutor.AUTORESEARCH
-                proposal.stage = "experimentation"
-                series_hint = ""
-                if results_tsv_path:
-                    series_name = Path(results_tsv_path).name
-                    branch_fragment = f" for `{preferred_branch}`" if preferred_branch else ""
-                    series_hint = (
-                        f" If `{series_name}`{branch_fragment} changed, refresh it with: "
-                        f"PYTHONPATH=src python -m aieq_core.cli import-autoresearch-results "
-                        f"{ledger.path} --claim-id {proposal.claim_id} --results-tsv "
-                        f"{results_tsv_path}"
-                        f"{f' --branch {preferred_branch}' if preferred_branch else ''}"
-                    )
-                proposal.command_hint = (
-                    "Run an autoresearch experiment, capture the run log, then import it with: "
-                    f"PYTHONPATH=src python -m aieq_core.cli import-autoresearch-run {ledger.path} "
-                    f"--claim-id {proposal.claim_id} --run-log <run.log> "
-                    f"--description \"{claim.title}\""
-                    f"{series_hint}"
-                )
-            elif proposal.action_type == ActionType.REPRODUCE_RESULT:
-                if metrics["open_attack_count"] > 0:
-                    proposal.expected_information_gain = clamp(
-                        proposal.expected_information_gain * 0.55
-                    )
-                    proposal.reason += " Open attacks should be triaged before spending more budget on reproduction."
-                proposal.executor = ActionExecutor.AUTORESEARCH
-                proposal.stage = "reproduction"
-                proposal.command_hint = (
-                    "Repeat the experiment under a fresh autoresearch run and import the new log "
-                    f"with claim id {proposal.claim_id}."
-                )
-            elif proposal.action_type == ActionType.TRIAGE_ATTACK:
-                proposal.expected_information_gain = clamp(
-                    proposal.expected_information_gain
-                    + 0.25 * metrics["open_attack_load"]
-                    + (0.10 if metrics["open_attack_count"] > 0 else 0.0)
-                )
-                proposal.executor = (
-                    ActionExecutor.DENARIO if denario_meta.get("project_dir") else ActionExecutor.MANUAL
-                )
-                proposal.stage = "critique"
-                if denario_meta.get("project_dir"):
-                    proposal.command_hint = (
-                        f"Use the Denario project at {denario_meta['project_dir']} to refine the "
-                        f"claim or produce a referee/literature update, then re-import it with "
-                        f"--claim-id {proposal.claim_id}."
-                    )
-                else:
-                    proposal.command_hint = "Resolve or rebut the open attack, then update the ledger."
-            elif proposal.action_type == ActionType.COLLECT_COUNTEREVIDENCE:
-                proposal.executor = ActionExecutor.DENARIO
-                proposal.stage = "critique"
-                proposal.command_hint = (
-                    "Collect negative or disconfirming evidence, ideally via Denario literature "
-                    "or method analysis, then add it as evidence or attacks."
-                )
-            elif proposal.action_type == ActionType.CHALLENGE_ASSUMPTION:
-                proposal.executor = ActionExecutor.MANUAL
-                proposal.stage = "critique"
-                proposal.command_hint = (
-                    "Design a falsification test for the highest-risk assumption and record the "
-                    "result as new evidence."
-                )
-            enriched.append(proposal)
-        return enriched
 
     def _apply_history_feedback(
         self, ledger: EpistemicLedger, proposal: ActionProposal
@@ -297,11 +160,16 @@ class ResearchController:
             avg_success_artifact_quality = (
                 sum(item.artifact_quality or 0.0 for item in succeeded) / len(succeeded)
             )
-            if proposal.action_type in {
+            if action_matches(
+                proposal.action_type,
                 ActionType.GENERATE_IDEA,
                 ActionType.GENERATE_METHOD,
                 ActionType.SYNTHESIZE_PAPER,
-            }:
+                ActionType.PROPOSE_HYPOTHESIS,
+                ActionType.DESIGN_MUTATION,
+                ActionType.SYNTHESIZE_REPORT,
+                ActionType.PROMOTE_WINNER,
+            ):
                 proposal.expected_information_gain = clamp(
                     proposal.expected_information_gain * 0.35
                 )
@@ -322,15 +190,15 @@ class ResearchController:
 
     def _build_summary(self, ledger: EpistemicLedger, primary: ActionProposal) -> str:
         claim_count = len([claim for claim in ledger.list_claims() if claim.status != ClaimStatus.ARCHIVED])
-        if primary.action_type == ActionType.SYNTHESIZE_PAPER:
+        if action_matches(primary.action_type, ActionType.SYNTHESIZE_PAPER, ActionType.SYNTHESIZE_REPORT):
             return (
                 f"{claim_count} active claims tracked. The top claim is stable enough that paper "
-                f"synthesis is now the best move."
+                f"synthesis/reporting is now the best move."
             )
-        if primary.action_type == ActionType.GENERATE_METHOD:
+        if action_matches(primary.action_type, ActionType.GENERATE_METHOD, ActionType.DESIGN_MUTATION):
             return (
-                f"{claim_count} active claims tracked. The top claim is blocked on methodology, "
-                f"so Denario should generate the next executable plan."
+                f"{claim_count} active claims tracked. The top claim is blocked on the next "
+                f"mutation/design step."
             )
         return (
             f"{claim_count} active claims tracked. The highest-value next move is "

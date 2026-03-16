@@ -37,6 +37,12 @@ class AttackStatus(str, Enum):
 
 
 class ActionType(str, Enum):
+    PROPOSE_HYPOTHESIS = "propose_hypothesis"
+    DESIGN_MUTATION = "design_mutation"
+    RUN_EVAL = "run_eval"
+    ANALYZE_FAILURE = "analyze_failure"
+    PROMOTE_WINNER = "promote_winner"
+    SYNTHESIZE_REPORT = "synthesize_report"
     GENERATE_IDEA = "generate_idea"
     GENERATE_METHOD = "generate_method"
     RUN_EXPERIMENT = "run_experiment"
@@ -51,6 +57,7 @@ class ActionExecutor(str, Enum):
     AIEQ_CORE = "aieq_core"
     DENARIO = "denario"
     AUTORESEARCH = "autoresearch"
+    SKILL_OPTIMIZER = "skill_optimizer"
     MANUAL = "manual"
 
 
@@ -66,6 +73,13 @@ class ExecutionStatus(str, Enum):
 class ArtifactKind(str, Enum):
     METHOD = "method"
     PAPER = "paper"
+
+
+class ReviewStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    SKIPPED = "skipped"
 
 
 @dataclass(slots=True)
@@ -86,6 +100,10 @@ class Claim:
     artifact_ids: list[str] = field(default_factory=list)
     decision_ids: list[str] = field(default_factory=list)
     execution_ids: list[str] = field(default_factory=list)
+    target_ids: list[str] = field(default_factory=list)
+    eval_suite_ids: list[str] = field(default_factory=list)
+    mutation_candidate_ids: list[str] = field(default_factory=list)
+    eval_run_ids: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -161,6 +179,92 @@ class Artifact:
 
 
 @dataclass(slots=True)
+class ArtifactTarget:
+    id: str
+    claim_id: str
+    mode: str
+    target_type: str
+    title: str
+    content: str = ""
+    source_type: str = "manual"
+    source_ref: str = ""
+    source_path: str = ""
+    mutable_fields: list[str] = field(default_factory=list)
+    invariant_constraints: dict[str, Any] = field(default_factory=dict)
+    promoted_candidate_id: str = ""
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class EvalSuite:
+    id: str
+    claim_id: str
+    target_id: str
+    name: str
+    compatible_target_type: str
+    scoring_method: str = "binary"
+    aggregation: str = "average"
+    pass_threshold: float = 1.0
+    repetitions: int = 1
+    cases: list[dict[str, Any]] = field(default_factory=list)
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.pass_threshold = clamp(float(self.pass_threshold))
+        self.repetitions = max(1, int(self.repetitions))
+
+
+@dataclass(slots=True)
+class MutationCandidate:
+    id: str
+    claim_id: str
+    target_id: str
+    parent_candidate_id: str = ""
+    summary: str = ""
+    content: str = ""
+    source_type: str = "manual"
+    source_ref: str = ""
+    source_path: str = ""
+    review_status: ReviewStatus = ReviewStatus.PENDING
+    review_notes: str = ""
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+    artifact_paths: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class EvalRun:
+    id: str
+    claim_id: str
+    target_id: str
+    suite_id: str
+    candidate_id: str
+    case_id: str
+    run_index: int
+    score: float
+    passed: bool
+    raw_output: str = ""
+    runtime_seconds: float | None = None
+    cost_estimate_usd: float | None = None
+    artifact_paths: list[str] = field(default_factory=list)
+    created_at: str = field(default_factory=utc_now)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.run_index = max(0, int(self.run_index))
+        self.score = clamp(float(self.score))
+        if self.runtime_seconds is not None:
+            self.runtime_seconds = max(0.0, float(self.runtime_seconds))
+        if self.cost_estimate_usd is not None:
+            self.cost_estimate_usd = max(0.0, float(self.cost_estimate_usd))
+
+
+@dataclass(slots=True)
 class ActionProposal:
     claim_id: str
     claim_title: str
@@ -169,6 +273,7 @@ class ActionProposal:
     priority: str
     reason: str
     executor: ActionExecutor = ActionExecutor.AIEQ_CORE
+    mode: str = ""
     stage: str = ""
     command_hint: str = ""
 
@@ -195,6 +300,7 @@ class DecisionRecord:
     priority: str
     expected_information_gain: float
     reason: str
+    mode: str = ""
     command_hint: str = ""
     created_at: str = field(default_factory=utc_now)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -212,6 +318,7 @@ class ExecutionRecord:
     action_type: ActionType
     executor: ActionExecutor
     status: ExecutionStatus
+    mode: str = ""
     notes: str = ""
     runtime_seconds: float | None = None
     cost_estimate_usd: float | None = None
@@ -227,6 +334,25 @@ class ExecutionRecord:
             self.cost_estimate_usd = max(0.0, float(self.cost_estimate_usd))
         if self.artifact_quality is not None:
             self.artifact_quality = clamp(float(self.artifact_quality))
+
+
+ACTION_COMPATIBILITY_MAP: dict[ActionType, ActionType] = {
+    ActionType.GENERATE_IDEA: ActionType.PROPOSE_HYPOTHESIS,
+    ActionType.GENERATE_METHOD: ActionType.DESIGN_MUTATION,
+    ActionType.RUN_EXPERIMENT: ActionType.RUN_EVAL,
+    ActionType.REPRODUCE_RESULT: ActionType.RUN_EVAL,
+    ActionType.SYNTHESIZE_PAPER: ActionType.SYNTHESIZE_REPORT,
+}
+
+
+def canonical_action_type(action_type: ActionType | str) -> ActionType:
+    value = action_type if isinstance(action_type, ActionType) else ActionType(action_type)
+    return ACTION_COMPATIBILITY_MAP.get(value, value)
+
+
+def action_matches(action_type: ActionType | str, *candidates: ActionType | str) -> bool:
+    canonical = canonical_action_type(action_type)
+    return any(canonical == canonical_action_type(item) for item in candidates)
 
 
 def serialize_dataclass(value: Any) -> Any:
