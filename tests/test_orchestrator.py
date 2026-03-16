@@ -64,6 +64,8 @@ def make_runtime_config(
         method_bridge_enabled=True,
         method_bridge_model="gpt-4.1",
         method_bridge_timeout_seconds=120,
+        intake_hypothesis_model="gpt-5-mini",
+        intake_timeout_seconds=120,
         skill_mutation_model="gpt-5-mini",
         skill_review_model="gpt-5-mini",
         skill_eval_model="gpt-5-mini",

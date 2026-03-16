@@ -82,6 +82,12 @@ class ReviewStatus(str, Enum):
     SKIPPED = "skipped"
 
 
+class HypothesisStatus(str, Enum):
+    PROPOSED = "proposed"
+    MATERIALIZED = "materialized"
+    DISMISSED = "dismissed"
+
+
 @dataclass(slots=True)
 class Claim:
     id: str
@@ -104,6 +110,8 @@ class Claim:
     eval_suite_ids: list[str] = field(default_factory=list)
     mutation_candidate_ids: list[str] = field(default_factory=list)
     eval_run_ids: list[str] = field(default_factory=list)
+    input_ids: list[str] = field(default_factory=list)
+    hypothesis_ids: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -195,6 +203,57 @@ class ArtifactTarget:
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class InputArtifact:
+    id: str
+    title: str
+    input_type: str
+    content: str
+    source_type: str = "manual"
+    source_ref: str = ""
+    source_path: str = ""
+    summary: str = ""
+    linked_claim_ids: list[str] = field(default_factory=list)
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+    tags: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class InnovationHypothesis:
+    id: str
+    input_id: str
+    title: str
+    statement: str
+    summary: str = ""
+    rationale: str = ""
+    recommended_mode: str = ""
+    target_type: str = ""
+    target_title: str = ""
+    target_source_strategy: str = ""
+    mutable_fields: list[str] = field(default_factory=list)
+    suggested_constraints: list[str] = field(default_factory=list)
+    eval_outline: list[str] = field(default_factory=list)
+    leverage: float = 0.5
+    testability: float = 0.5
+    novelty: float = 0.5
+    optimization_readiness: float = 0.5
+    overall_score: float = 0.0
+    status: HypothesisStatus = HypothesisStatus.PROPOSED
+    materialized_claim_id: str = ""
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.leverage = clamp(float(self.leverage))
+        self.testability = clamp(float(self.testability))
+        self.novelty = clamp(float(self.novelty))
+        self.optimization_readiness = clamp(float(self.optimization_readiness))
+        self.overall_score = clamp(float(self.overall_score))
 
 
 @dataclass(slots=True)

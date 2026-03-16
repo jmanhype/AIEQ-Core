@@ -161,6 +161,8 @@ class RuntimeConfig:
     method_bridge_enabled: bool
     method_bridge_model: str
     method_bridge_timeout_seconds: int
+    intake_hypothesis_model: str
+    intake_timeout_seconds: int
     skill_mutation_model: str
     skill_review_model: str
     skill_eval_model: str
@@ -233,6 +235,9 @@ class RuntimeConfig:
             method_bridge_timeout_seconds=int(
                 env.get("AIEQ_METHOD_BRIDGE_TIMEOUT_SECONDS", "120")
             ),
+            intake_hypothesis_model=env.get("AIEQ_INTAKE_HYPOTHESIS_MODEL", "gpt-5-mini").strip()
+            or "gpt-5-mini",
+            intake_timeout_seconds=int(env.get("AIEQ_INTAKE_TIMEOUT_SECONDS", "120")),
             skill_mutation_model=env.get("AIEQ_SKILL_MUTATION_MODEL", "gpt-5-mini").strip()
             or "gpt-5-mini",
             skill_review_model=env.get("AIEQ_SKILL_REVIEW_MODEL", "gpt-5-mini").strip()
@@ -528,6 +533,17 @@ def doctor_report(
             f"Missing OPENAI_API_KEY for skill optimization model {config.skill_mutation_model}."
         )
 
+    intake_provider = provider_for_model(config.intake_hypothesis_model)
+    intake_blockers: list[str] = []
+    if intake_provider != "openai":
+        intake_blockers.append(
+            f"Only OpenAI-backed intake generation is implemented; got {config.intake_hypothesis_model}."
+        )
+    if not key_presence["OPENAI_API_KEY"]:
+        intake_blockers.append(
+            f"Missing OPENAI_API_KEY for intake hypothesis model {config.intake_hypothesis_model}."
+        )
+
     def denario_capability(model_name: str, *, action: str) -> dict[str, Any]:
         blocked_by: list[str] = []
         provider = provider_for_model(model_name)
@@ -598,6 +614,14 @@ def doctor_report(
             "model": config.skill_mutation_model,
             "provider": skill_provider,
         },
+        "generate_hypotheses": {
+            "action": "generate_hypotheses",
+            "executor": "aieq_core",
+            "available": not intake_blockers,
+            "blocked_by": intake_blockers,
+            "model": config.intake_hypothesis_model,
+            "provider": intake_provider,
+        },
         "run_eval": {
             "action": "run_eval",
             "executor": "skill_optimizer",
@@ -650,6 +674,7 @@ def doctor_report(
             "default_autoresearch_branch": config.default_autoresearch_branch,
             "autoresearch_remote_host": config.autoresearch_remote_host,
             "autoresearch_remote_repo": config.autoresearch_remote_repo,
+            "intake_hypothesis_model": config.intake_hypothesis_model,
             "skill_mutation_model": config.skill_mutation_model,
             "skill_review_model": config.skill_review_model,
             "skill_eval_model": config.skill_eval_model,

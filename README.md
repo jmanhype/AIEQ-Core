@@ -20,6 +20,12 @@ The current built-in modes are:
 - `skill_optimizer`
   - prompt and `SKILL.md`-style optimization against explicit eval suites
 
+On top of those modes, the repo now has an **intake layer** for arbitrary input:
+
+- register a repo, document, prompt, or inline text as an input artifact
+- generate ranked feature or optimization hypotheses from that input
+- materialize the best hypothesis into a real claim and, when possible, a real target
+
 The name comes from **Axiomatic Inversion & Epistemic Quarantine**:
 
 - **Axiomatic inversion**: deliberately perturb or invert common assumptions to
@@ -85,7 +91,9 @@ The repo now contains both the reusable kernel and the first mode split:
   - typed schema for claims, assumptions, evidence, attacks, artifacts, ranked actions, and generic optimization entities such as targets, eval suites, mutation candidates, and eval runs
 - `src/aieq_core/ledger.py`
   - persistent JSON ledger with derived belief/status updates
-  - now includes first-class optimization targets, mutation candidates, eval suites, eval runs, and existing method/paper artifacts
+  - now includes first-class inputs, innovation hypotheses, optimization targets, mutation candidates, eval suites, eval runs, and existing method/paper artifacts
+- `src/aieq_core/intake.py`
+  - Denario-style intake layer that turns arbitrary input into ranked, testable hypotheses and can materialize those hypotheses into real claims and targets
 - `src/aieq_core/policy.py`
   - action ranking based on expected information gain
 - `src/aieq_core/modes/`
@@ -143,6 +151,7 @@ The current execution plane automates:
 - `generate_method` via Denario
 - `synthesize_paper` via Denario
 - `run_experiment` and `reproduce_result` via `autoresearch`
+- `generate_hypotheses` via the intake layer
 - `design_mutation`, `run_eval`, `analyze_failure`, and `promote_winner` for `skill_optimizer`
 
 It does this without collapsing the upstream repos into one monolith:
@@ -269,6 +278,37 @@ PYTHONPATH=src python -m aieq_core.cli run-loop data/ledger.json \
   --mode skill_optimizer \
   --iterations 3
 ```
+
+### Intake quick start
+
+Register arbitrary input:
+
+```bash
+PYTHONPATH=src python -m aieq_core.cli ingest register data/ledger.json \
+  --title "OpenSquirrel repo" \
+  --source-path /absolute/path/to/OpenSquirrel
+```
+
+Generate and rank hypotheses from that input:
+
+```bash
+PYTHONPATH=src python -m aieq_core.cli generate-hypotheses data/ledger.json \
+  --input-id <input-id> \
+  --count 5
+```
+
+Materialize the best hypothesis into a real claim and, when possible, a
+`skill_optimizer` target:
+
+```bash
+PYTHONPATH=src python -m aieq_core.cli materialize-target data/ledger.json \
+  --hypothesis-id <hypothesis-id>
+```
+
+For repo-shaped inputs, materialization may stop at a claim if the hypothesis
+does not yet resolve to a concrete mutable file or prompt. That is intentional:
+the intake layer is allowed to say “this idea is promising, but you still need
+to extract the artifact before optimization can begin.”
 
 Or promote the current best evaluated candidate:
 

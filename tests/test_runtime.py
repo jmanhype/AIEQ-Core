@@ -53,6 +53,8 @@ class RuntimeDoctorTests(unittest.TestCase):
                 method_bridge_enabled=True,
                 method_bridge_model="gpt-4.1",
                 method_bridge_timeout_seconds=120,
+                intake_hypothesis_model="gpt-5-mini",
+                intake_timeout_seconds=120,
                 skill_mutation_model="gpt-5-mini",
                 skill_review_model="gpt-5-mini",
                 skill_eval_model="gpt-5-mini",
@@ -110,6 +112,8 @@ class RuntimeDoctorTests(unittest.TestCase):
                 method_bridge_enabled=True,
                 method_bridge_model="gpt-4.1",
                 method_bridge_timeout_seconds=120,
+                intake_hypothesis_model="gpt-5-mini",
+                intake_timeout_seconds=120,
                 skill_mutation_model="gpt-5-mini",
                 skill_review_model="gpt-5-mini",
                 skill_eval_model="gpt-5-mini",
@@ -179,6 +183,8 @@ class RuntimeDoctorTests(unittest.TestCase):
                 method_bridge_enabled=True,
                 method_bridge_model="gpt-4.1",
                 method_bridge_timeout_seconds=120,
+                intake_hypothesis_model="gpt-5-mini",
+                intake_timeout_seconds=120,
                 skill_mutation_model="gpt-5-mini",
                 skill_review_model="gpt-5-mini",
                 skill_eval_model="gpt-5-mini",
@@ -188,6 +194,7 @@ class RuntimeDoctorTests(unittest.TestCase):
             with patch("aieq_core.runtime.shutil.which", return_value="/usr/bin/git"):
                 report = doctor_report(config)
 
+            self.assertTrue(report["capabilities"]["generate_hypotheses"]["available"])
             self.assertTrue(report["capabilities"]["design_mutation"]["available"])
             self.assertTrue(report["capabilities"]["run_eval"]["available"])
             self.assertTrue(report["capabilities"]["promote_winner"]["available"])

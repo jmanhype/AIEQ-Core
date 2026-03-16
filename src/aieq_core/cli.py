@@ -8,6 +8,12 @@ from typing import Sequence
 from .adapters.autoresearch import AutoresearchAdapter
 from .adapters.denario import DenarioAdapter
 from .controller import ResearchController
+from .intake import (
+    AIEQIntakeService,
+    infer_input_type,
+    load_input_payload,
+    summarize_content,
+)
 from .ledger import EpistemicLedger
 from .modes import default_mode_registry
 from .modes.skill_optimizer import SkillOptimizerMode
@@ -27,6 +33,51 @@ from .runtime import RuntimeConfig
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aieq-core")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    ingest_parser = subparsers.add_parser("ingest", help="Register arbitrary input for hypothesis generation")
+    ingest_subparsers = ingest_parser.add_subparsers(dest="ingest_command", required=True)
+    ingest_register = ingest_subparsers.add_parser("register", help="Register an intake input")
+    ingest_register.add_argument("ledger", help="Path to the ledger JSON file")
+    ingest_register.add_argument("--title", required=True)
+    ingest_register.add_argument("--input-type", default="")
+    ingest_register.add_argument("--source-path", default="")
+    ingest_register.add_argument("--content", default="")
+    ingest_register.add_argument("--content-file", default="")
+    ingest_register.add_argument("--summary", default="")
+    ingest_register.add_argument("--tag", action="append", default=[])
+
+    generate_hypotheses = subparsers.add_parser(
+        "generate-hypotheses",
+        help="Generate ranked innovation hypotheses from a registered input",
+    )
+    generate_hypotheses.add_argument("ledger", help="Path to the ledger JSON file")
+    generate_hypotheses.add_argument("--input-id", required=True)
+    generate_hypotheses.add_argument("--count", type=int, default=5)
+    generate_hypotheses.add_argument("--env-file", default="")
+
+    rank_hypotheses = subparsers.add_parser(
+        "rank-hypotheses",
+        help="Rank stored hypotheses for a registered input",
+    )
+    rank_hypotheses.add_argument("ledger", help="Path to the ledger JSON file")
+    rank_hypotheses.add_argument("--input-id", required=True)
+    rank_hypotheses.add_argument("--limit", type=int, default=10)
+
+    materialize = subparsers.add_parser(
+        "materialize-target",
+        help="Turn a stored hypothesis into a real claim and optional optimization target",
+    )
+    materialize.add_argument("ledger", help="Path to the ledger JSON file")
+    materialize.add_argument("--hypothesis-id", required=True)
+    materialize.add_argument("--mode", default="")
+    materialize.add_argument("--title", default="")
+    materialize.add_argument("--target-type", default="")
+    materialize.add_argument("--source-file", default="")
+    materialize.add_argument("--content", default="")
+    materialize.add_argument("--content-file", default="")
+    materialize.add_argument("--constraint-file", default="")
+    materialize.add_argument("--mutable-field", action="append", default=[])
+    materialize.add_argument("--claim-only", action="store_true")
 
     mode_parser = subparsers.add_parser("mode", help="Inspect registered innovation modes")
     mode_subparsers = mode_parser.add_subparsers(dest="mode_command", required=True)
@@ -271,6 +322,90 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.mode_command == "list":
             _emit({"modes": [serialize_dataclass(item) for item in registry.list_modes()]})
             return 0
+
+    if args.command == "ingest":
+        ledger = EpistemicLedger.load(args.ledger)
+        if args.ingest_command == "register":
+            content, source_type, source_path = load_input_payload(
+                source_path=args.source_path,
+                content=args.content,
+                content_file=args.content_file,
+            )
+            input_type = infer_input_type(
+                source_path=source_path or args.source_path,
+                explicit_type=args.input_type,
+            )
+            item = ledger.register_input(
+                title=args.title,
+                input_type=input_type,
+                content=content,
+                source_type=source_type,
+                source_path=source_path,
+                summary=args.summary or summarize_content(content),
+                tags=args.tag,
+                metadata={"source_title": args.title},
+            )
+            _emit({"input": serialize_dataclass(item)})
+            return 0
+
+    if args.command == "generate-hypotheses":
+        ledger = EpistemicLedger.load(args.ledger)
+        config = RuntimeConfig.load(env_file=args.env_file or None)
+        service = AIEQIntakeService(config=config)
+        payload = service.generate_hypotheses(
+            ledger=ledger,
+            input_id=args.input_id,
+            count=args.count,
+        )
+        _emit(
+            {
+                "input": serialize_dataclass(payload["input"]),
+                "hypotheses": [serialize_dataclass(item) for item in payload["hypotheses"]],
+            }
+        )
+        return 0
+
+    if args.command == "rank-hypotheses":
+        ledger = EpistemicLedger.load(args.ledger)
+        item = ledger.get_input(args.input_id)
+        ranked = AIEQIntakeService(config=RuntimeConfig.load()).rank_hypotheses(
+            ledger=ledger,
+            input_id=args.input_id,
+            limit=args.limit,
+        )
+        _emit(
+            {
+                "input": serialize_dataclass(item),
+                "hypotheses": [serialize_dataclass(hypothesis) for hypothesis in ranked],
+            }
+        )
+        return 0
+
+    if args.command == "materialize-target":
+        ledger = EpistemicLedger.load(args.ledger)
+        service = AIEQIntakeService(config=RuntimeConfig.load())
+        payload = service.materialize_target(
+            ledger=ledger,
+            hypothesis_id=args.hypothesis_id,
+            mode=args.mode,
+            title=args.title,
+            target_type=args.target_type,
+            source_file=args.source_file,
+            content=args.content,
+            content_file=args.content_file,
+            constraint_file=args.constraint_file,
+            mutable_fields=args.mutable_field,
+            claim_only=args.claim_only,
+        )
+        _emit(
+            {
+                "claim": serialize_dataclass(payload["claim"]),
+                "target": serialize_dataclass(payload["target"]) if payload["target"] else None,
+                "requires_target_registration": payload["requires_target_registration"],
+                "recommended_mode": payload["recommended_mode"],
+            }
+        )
+        return 0
 
     if args.command == "target":
         ledger = EpistemicLedger.load(args.ledger)

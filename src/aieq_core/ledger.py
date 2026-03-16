@@ -8,6 +8,8 @@ from typing import Any
 from .models import (
     Assumption,
     Artifact,
+    InputArtifact,
+    InnovationHypothesis,
     ArtifactTarget,
     ArtifactKind,
     Attack,
@@ -21,6 +23,7 @@ from .models import (
     EvalSuite,
     ExecutionRecord,
     ExecutionStatus,
+    HypothesisStatus,
     MutationCandidate,
     ReviewStatus,
     ActionExecutor,
@@ -31,7 +34,7 @@ from .models import (
     utc_now,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class EpistemicLedger:
@@ -46,6 +49,8 @@ class EpistemicLedger:
         evidence: dict[str, Evidence] | None = None,
         attacks: dict[str, Attack] | None = None,
         artifacts: dict[str, Artifact] | None = None,
+        inputs: dict[str, InputArtifact] | None = None,
+        hypotheses: dict[str, InnovationHypothesis] | None = None,
         targets: dict[str, ArtifactTarget] | None = None,
         eval_suites: dict[str, EvalSuite] | None = None,
         mutation_candidates: dict[str, MutationCandidate] | None = None,
@@ -59,6 +64,8 @@ class EpistemicLedger:
         self.evidence = evidence or {}
         self.attacks = attacks or {}
         self.artifacts = artifacts or {}
+        self.inputs = inputs or {}
+        self.hypotheses = hypotheses or {}
         self.targets = targets or {}
         self.eval_suites = eval_suites or {}
         self.mutation_candidates = mutation_candidates or {}
@@ -117,6 +124,21 @@ class EpistemicLedger:
             )
             for raw in payload.get("artifacts", [])
         }
+        inputs = {
+            raw["id"]: InputArtifact(**raw)
+            for raw in payload.get("inputs", [])
+        }
+        hypotheses = {
+            raw["id"]: InnovationHypothesis(
+                **{
+                    **raw,
+                    "status": HypothesisStatus(
+                        raw.get("status", HypothesisStatus.PROPOSED.value)
+                    ),
+                }
+            )
+            for raw in payload.get("hypotheses", [])
+        }
         targets = {
             raw["id"]: ArtifactTarget(**raw)
             for raw in payload.get("targets", [])
@@ -168,6 +190,8 @@ class EpistemicLedger:
             evidence=evidence,
             attacks=attacks,
             artifacts=artifacts,
+            inputs=inputs,
+            hypotheses=hypotheses,
             targets=targets,
             eval_suites=eval_suites,
             mutation_candidates=mutation_candidates,
@@ -200,6 +224,14 @@ class EpistemicLedger:
             "artifacts": [
                 serialize_dataclass(item)
                 for item in sorted(self.artifacts.values(), key=lambda item: item.created_at)
+            ],
+            "inputs": [
+                serialize_dataclass(item)
+                for item in sorted(self.inputs.values(), key=lambda item: item.created_at)
+            ],
+            "hypotheses": [
+                serialize_dataclass(item)
+                for item in sorted(self.hypotheses.values(), key=lambda item: item.created_at)
             ],
             "targets": [
                 serialize_dataclass(item)
@@ -252,6 +284,10 @@ class EpistemicLedger:
             "artifacts": [
                 serialize_dataclass(item) for item in self.artifacts_for_claim(claim_id)
             ],
+            "inputs": [serialize_dataclass(item) for item in self.inputs_for_claim(claim_id)],
+            "hypotheses": [
+                serialize_dataclass(item) for item in self.hypotheses_for_claim(claim_id)
+            ],
             "targets": [serialize_dataclass(item) for item in self.targets_for_claim(claim_id)],
             "eval_suites": [
                 serialize_dataclass(item) for item in self.eval_suites_for_claim(claim_id)
@@ -285,6 +321,8 @@ class EpistemicLedger:
                     "open_attack_count": metrics["open_attack_count"],
                     "artifact_count": metrics["artifact_count"],
                     "target_count": metrics["target_count"],
+                    "input_count": metrics["input_count"],
+                    "hypothesis_count": metrics["hypothesis_count"],
                     "eval_suite_count": metrics["eval_suite_count"],
                     "mutation_candidate_count": metrics["mutation_candidate_count"],
                     "eval_run_count": metrics["eval_run_count"],
@@ -437,6 +475,89 @@ class EpistemicLedger:
         self.artifacts[artifact.id] = artifact
         self.save()
         return artifact
+
+    def register_input(
+        self,
+        *,
+        title: str,
+        input_type: str,
+        content: str,
+        source_type: str = "manual",
+        source_ref: str = "",
+        source_path: str = "",
+        summary: str = "",
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        input_id: str | None = None,
+    ) -> InputArtifact:
+        item = InputArtifact(
+            id=input_id or self._generate_id("inp"),
+            title=title,
+            input_type=input_type,
+            content=content,
+            source_type=source_type,
+            source_ref=source_ref,
+            source_path=source_path,
+            summary=summary,
+            tags=tags or [],
+            metadata=metadata or {},
+        )
+        self.inputs[item.id] = item
+        self.save()
+        return item
+
+    def add_hypothesis(
+        self,
+        *,
+        input_id: str,
+        title: str,
+        statement: str,
+        summary: str = "",
+        rationale: str = "",
+        recommended_mode: str = "",
+        target_type: str = "",
+        target_title: str = "",
+        target_source_strategy: str = "",
+        mutable_fields: list[str] | None = None,
+        suggested_constraints: list[str] | None = None,
+        eval_outline: list[str] | None = None,
+        leverage: float = 0.5,
+        testability: float = 0.5,
+        novelty: float = 0.5,
+        optimization_readiness: float = 0.5,
+        overall_score: float = 0.0,
+        status: HypothesisStatus | str = HypothesisStatus.PROPOSED,
+        materialized_claim_id: str = "",
+        metadata: dict[str, Any] | None = None,
+        hypothesis_id: str | None = None,
+    ) -> InnovationHypothesis:
+        self.get_input(input_id)
+        hypothesis = InnovationHypothesis(
+            id=hypothesis_id or self._generate_id("hyp"),
+            input_id=input_id,
+            title=title,
+            statement=statement,
+            summary=summary,
+            rationale=rationale,
+            recommended_mode=recommended_mode,
+            target_type=target_type,
+            target_title=target_title,
+            target_source_strategy=target_source_strategy,
+            mutable_fields=mutable_fields or [],
+            suggested_constraints=suggested_constraints or [],
+            eval_outline=eval_outline or [],
+            leverage=leverage,
+            testability=testability,
+            novelty=novelty,
+            optimization_readiness=optimization_readiness,
+            overall_score=overall_score,
+            status=status if isinstance(status, HypothesisStatus) else HypothesisStatus(status),
+            materialized_claim_id=materialized_claim_id,
+            metadata=metadata or {},
+        )
+        self.hypotheses[hypothesis.id] = hypothesis
+        self.save()
+        return hypothesis
 
     def register_target(
         self,
@@ -675,6 +796,20 @@ class EpistemicLedger:
             if artifact_id in self.artifacts
         ]
 
+    def inputs_for_claim(self, claim_id: str) -> list[InputArtifact]:
+        return [
+            self.inputs[input_id]
+            for input_id in self.get_claim(claim_id).input_ids
+            if input_id in self.inputs
+        ]
+
+    def hypotheses_for_claim(self, claim_id: str) -> list[InnovationHypothesis]:
+        return [
+            self.hypotheses[hypothesis_id]
+            for hypothesis_id in self.get_claim(claim_id).hypothesis_ids
+            if hypothesis_id in self.hypotheses
+        ]
+
     def targets_for_claim(self, claim_id: str) -> list[ArtifactTarget]:
         return [
             self.targets[target_id]
@@ -717,11 +852,30 @@ class EpistemicLedger:
             if execution_id in self.executions
         ]
 
+    def hypotheses_for_input(self, input_id: str) -> list[InnovationHypothesis]:
+        self.get_input(input_id)
+        return sorted(
+            [item for item in self.hypotheses.values() if item.input_id == input_id],
+            key=lambda item: item.created_at,
+        )
+
     def get_claim(self, claim_id: str) -> Claim:
         try:
             return self.claims[claim_id]
         except KeyError as exc:
             raise KeyError(f"Unknown claim id: {claim_id}") from exc
+
+    def get_input(self, input_id: str) -> InputArtifact:
+        try:
+            return self.inputs[input_id]
+        except KeyError as exc:
+            raise KeyError(f"Unknown input id: {input_id}") from exc
+
+    def get_hypothesis(self, hypothesis_id: str) -> InnovationHypothesis:
+        try:
+            return self.hypotheses[hypothesis_id]
+        except KeyError as exc:
+            raise KeyError(f"Unknown hypothesis id: {hypothesis_id}") from exc
 
     def get_decision(self, decision_id: str) -> DecisionRecord:
         try:
@@ -752,6 +906,12 @@ class EpistemicLedger:
 
     def list_executions(self) -> list[ExecutionRecord]:
         return sorted(self.executions.values(), key=lambda item: item.created_at)
+
+    def list_inputs(self) -> list[InputArtifact]:
+        return sorted(self.inputs.values(), key=lambda item: item.created_at)
+
+    def list_hypotheses(self) -> list[InnovationHypothesis]:
+        return sorted(self.hypotheses.values(), key=lambda item: item.created_at)
 
     def record_decision(
         self,
@@ -836,6 +996,30 @@ class EpistemicLedger:
         self.save()
         return record
 
+    def link_hypothesis_to_claim(
+        self,
+        *,
+        hypothesis_id: str,
+        claim_id: str,
+        status: HypothesisStatus | str = HypothesisStatus.MATERIALIZED,
+    ) -> InnovationHypothesis:
+        hypothesis = self.get_hypothesis(hypothesis_id)
+        self.get_claim(claim_id)
+        hypothesis.materialized_claim_id = claim_id
+        hypothesis.status = status if isinstance(status, HypothesisStatus) else HypothesisStatus(status)
+        hypothesis.updated_at = utc_now()
+        self.save()
+        return hypothesis
+
+    def link_input_to_claim(self, *, input_id: str, claim_id: str) -> InputArtifact:
+        item = self.get_input(input_id)
+        self.get_claim(claim_id)
+        if claim_id not in item.linked_claim_ids:
+            item.linked_claim_ids.append(claim_id)
+            item.updated_at = utc_now()
+        self.save()
+        return item
+
     def refresh_all(self) -> None:
         self._rebuild_indexes()
         for claim_id in self.claims:
@@ -857,6 +1041,8 @@ class EpistemicLedger:
         evidence = self.evidence_for_claim(claim_id)
         attacks = self.attacks_for_claim(claim_id)
         artifacts = self.artifacts_for_claim(claim_id)
+        inputs = self.inputs_for_claim(claim_id)
+        hypotheses = self.hypotheses_for_claim(claim_id)
         targets = self.targets_for_claim(claim_id)
         eval_suites = self.eval_suites_for_claim(claim_id)
         mutation_candidates = self.mutation_candidates_for_claim(claim_id)
@@ -1010,6 +1196,8 @@ class EpistemicLedger:
             "open_attack_count": len(open_attacks),
             "open_attack_load": round(open_attack_load, 6),
             "artifact_count": len(artifacts),
+            "input_count": len(inputs),
+            "hypothesis_count": len(hypotheses),
             "method_artifact_count": method_artifact_count,
             "paper_artifact_count": paper_artifact_count,
             "target_count": len(targets),
@@ -1105,6 +1293,8 @@ class EpistemicLedger:
             claim.evidence_ids = []
             claim.attack_ids = []
             claim.artifact_ids = []
+            claim.input_ids = []
+            claim.hypothesis_ids = []
             claim.target_ids = []
             claim.eval_suite_ids = []
             claim.mutation_candidate_ids = []
@@ -1127,6 +1317,15 @@ class EpistemicLedger:
         for artifact in self.artifacts.values():
             if artifact.claim_id in self.claims:
                 self.claims[artifact.claim_id].artifact_ids.append(artifact.id)
+
+        for item in self.inputs.values():
+            for claim_id in item.linked_claim_ids:
+                if claim_id in self.claims:
+                    self.claims[claim_id].input_ids.append(item.id)
+
+        for hypothesis in self.hypotheses.values():
+            if hypothesis.materialized_claim_id in self.claims:
+                self.claims[hypothesis.materialized_claim_id].hypothesis_ids.append(hypothesis.id)
 
         for target in self.targets.values():
             if target.claim_id in self.claims:
