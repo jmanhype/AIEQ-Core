@@ -174,8 +174,11 @@ It also now has a first semantic bridge between Denario and `autoresearch`:
 
 - if a claim has a Denario method artifact
 - the execution plane rewrites `train.py` through an OpenAI-backed bridge
+- validates that the generated file still preserves the `autoresearch` contract
+- runs a second review pass before any GPU work is launched
 - applies that rewritten file only for the current `autoresearch` run
 - captures prompt/response/generated-file artifacts in the execution directory
+- retries once with a repaired bridge draft if the first bridged run crashes
 - then restores the worker's prior `train.py`
 
 It also introduces a capability-aware preflight layer:

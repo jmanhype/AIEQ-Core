@@ -172,9 +172,14 @@ For `autoresearch`, the runner also writes a branch-local `results.tsv` under
 `.aieq-runtime/` and re-imports that series so the controller sees aggregate
 momentum, crash rate, and stagnation after each automated run.
 If the target claim already has a Denario method artifact, `run-next` now uses
-an OpenAI-backed bridge to rewrite `train.py` for that single run, stores the
-prompt/response/generated file under `.aieq-runtime/executions/<decision-id>/`,
-and restores the worker's original `train.py` after execution.
+an OpenAI-backed bridge to rewrite `train.py` for that single run, validates
+that the generated file still preserves the local `autoresearch` run-log
+contract, asks a second model pass to review the candidate before launch, and
+stores the prompt/response/generated file under
+`.aieq-runtime/executions/<decision-id>/`. If the first bridged run still
+crashes, the execution plane captures the runtime error, requests one repaired
+bridge draft, and retries once before restoring the worker's original
+`train.py`.
 
 ### Remote `autoresearch`
 
@@ -357,7 +362,9 @@ signals.
 It also reads first-class Denario method and paper artifacts, so methodology and
 paper presence no longer depend on ad hoc claim metadata alone. When a method
 artifact exists, the execution plane can now bridge that method into a concrete
-`train.py` rewrite before launching `autoresearch`.
+`train.py` rewrite before launching `autoresearch`, review that draft before it
+touches the worker, and keep per-attempt bridge artifacts plus runtime-repair
+history in the execution record.
 
 If you want the controller to only recommend without executing, keep using:
 

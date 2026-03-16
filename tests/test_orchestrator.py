@@ -10,7 +10,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from aieq_core.ledger import EpistemicLedger
-from aieq_core.method_bridge import MethodBridgeDraft
+from aieq_core.method_bridge import MethodBridgeDraft, MethodBridgeReview
 from aieq_core.orchestrator import CommandResult, ExternalCommand, ResearchOrchestrator
 from aieq_core.runtime import RuntimeConfig
 
@@ -311,6 +311,20 @@ class ResearchOrchestratorTests(unittest.TestCase):
                     usage={"input_tokens": 10, "output_tokens": 20},
                     raw_response={"id": "resp_test"},
                 ),
+            ), patch.object(
+                ResearchOrchestrator,
+                "_review_method_bridge",
+                return_value=MethodBridgeReview(
+                    model="gpt-4.1",
+                    prompt="review prompt",
+                    approved=True,
+                    summary="Bridge looks executable.",
+                    blockers=[],
+                    warnings=["Preserved existing summary labels."],
+                    response_id="resp_review",
+                    usage={"input_tokens": 8, "output_tokens": 12},
+                    raw_response={"id": "resp_review"},
+                ),
             ):
                 orchestrator = ResearchOrchestrator(config=config, command_runner=fake_runner)
                 payload = orchestrator.run_next(ledger_path)
@@ -323,12 +337,234 @@ class ResearchOrchestratorTests(unittest.TestCase):
             self.assertEqual(bridge["summary"], "Applied sparse-attention schedule.")
             self.assertTrue(Path(bridge["generated_train_path"]).exists())
             self.assertTrue(Path(bridge["original_train_path"]).exists())
+            self.assertTrue(bridge["review"]["approved"])
+            self.assertTrue(Path(bridge["review"]["prompt_path"]).exists())
 
             snapshot = EpistemicLedger.load(ledger_path).claim_snapshot(claim.id)
             execution = snapshot["executions"][-1]
             self.assertEqual(
                 execution["metadata"]["bridge"]["summary"],
                 "Applied sparse-attention schedule.",
+            )
+
+    def test_run_next_repairs_runtime_bridge_failure_and_reruns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = make_runtime_config(root, openai_key=True)
+            ledger_path = root / "ledger.json"
+            ledger = EpistemicLedger.load(ledger_path)
+            claim = ledger.add_claim(
+                title="Repair bridge after runtime crash",
+                statement="A runtime crash should trigger one repaired bridge rerun.",
+                novelty=0.9,
+                falsifiability=0.8,
+            )
+            method_path = root / "method.md"
+            method_path.write_text("Implement adaptive learning rates.\n", encoding="utf-8")
+            ledger.add_artifact(
+                claim_id=claim.id,
+                kind="method",
+                title="Denario method",
+                content=method_path.read_text(encoding="utf-8"),
+                source_type="denario",
+                source_path=str(method_path),
+            )
+
+            home = root / "home"
+            (home / ".cache" / "autoresearch").mkdir(parents=True, exist_ok=True)
+            train_path = config.autoresearch_repo / "train.py"
+            original_train = "print('original train')\n"
+            broken_train = "print('broken bridge')\n"
+            repaired_train = "print('repaired bridge')\n"
+            train_path.write_text(original_train, encoding="utf-8")
+            call_count = 0
+
+            def fake_runner(command: ExternalCommand) -> CommandResult:
+                nonlocal call_count
+                call_count += 1
+                log_path = Path(command.stdout_path)
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                if call_count == 1:
+                    self.assertEqual(train_path.read_text(encoding="utf-8"), broken_train)
+                    log_path.write_text(
+                        "Traceback (most recent call last):\n"
+                        "  File \"train.py\", line 10, in <module>\n"
+                        "NameError: name 'oops' is not defined\n",
+                        encoding="utf-8",
+                    )
+                    return CommandResult(returncode=1)
+
+                self.assertEqual(train_path.read_text(encoding="utf-8"), repaired_train)
+                log_path.write_text(
+                    "\n".join(
+                        [
+                            "---",
+                            "val_bpb:          0.997900",
+                            "training_seconds: 300.1",
+                            "total_seconds:    325.9",
+                            "peak_vram_mb:     45060.2",
+                            "mfu_percent:      39.80",
+                            "total_tokens_M:   499.6",
+                            "num_steps:        953",
+                            "num_params_M:     50.3",
+                            "depth:            8",
+                        ]
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                return CommandResult(returncode=0)
+
+            def fake_which(binary: str) -> str | None:
+                mapping = {
+                    "git": "/usr/bin/git",
+                    "nvidia-smi": "/usr/bin/nvidia-smi",
+                }
+                return mapping.get(binary)
+
+            with patch("pathlib.Path.home", return_value=home), patch(
+                "aieq_core.runtime.shutil.which",
+                side_effect=fake_which,
+            ), patch.object(
+                ResearchOrchestrator,
+                "_build_method_bridge",
+                return_value=MethodBridgeDraft(
+                    model="gpt-4.1",
+                    prompt="initial bridge prompt",
+                    summary="Initial bridge.",
+                    train_py=broken_train,
+                    response_id="resp_initial",
+                    usage={"input_tokens": 10, "output_tokens": 20},
+                    raw_response={"id": "resp_initial"},
+                ),
+            ), patch.object(
+                ResearchOrchestrator,
+                "_review_method_bridge",
+                return_value=MethodBridgeReview(
+                    model="gpt-4.1",
+                    prompt="review prompt",
+                    approved=True,
+                    summary="Initial bridge is safe to execute.",
+                    blockers=[],
+                    warnings=[],
+                    response_id="resp_review",
+                    usage={"input_tokens": 8, "output_tokens": 12},
+                    raw_response={"id": "resp_review"},
+                ),
+            ), patch.object(
+                ResearchOrchestrator,
+                "_repair_method_bridge_after_runtime_failure",
+                return_value=MethodBridgeDraft(
+                    model="gpt-4.1",
+                    prompt="runtime repair prompt",
+                    summary="Repaired bridge.",
+                    train_py=repaired_train,
+                    response_id="resp_repair",
+                    usage={"input_tokens": 15, "output_tokens": 25},
+                    raw_response={"id": "resp_repair"},
+                ),
+            ):
+                orchestrator = ResearchOrchestrator(config=config, command_runner=fake_runner)
+                payload = orchestrator.run_next(ledger_path)
+
+            self.assertTrue(payload["ok"])
+            self.assertEqual(call_count, 2)
+            self.assertEqual(train_path.read_text(encoding="utf-8"), original_train)
+            bridge = payload["result"]["bridge"]
+            self.assertEqual(bridge["attempt_count"], 2)
+            self.assertTrue(bridge["runtime_repair_applied"])
+            self.assertEqual(bridge["summary"], "Repaired bridge.")
+            self.assertEqual(bridge["attempts"][0]["repair_source"], "initial")
+            self.assertEqual(bridge["attempts"][1]["repair_source"], "runtime_failure")
+            self.assertTrue(Path(bridge["attempts"][1]["runtime_error_path"]).exists())
+
+            snapshot = EpistemicLedger.load(ledger_path).claim_snapshot(claim.id)
+            execution = snapshot["executions"][-1]
+            self.assertEqual(execution["metadata"]["bridge"]["attempt_count"], 2)
+
+    def test_run_next_skips_execution_when_bridge_review_rejects_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = make_runtime_config(root, openai_key=True)
+            ledger_path = root / "ledger.json"
+            ledger = EpistemicLedger.load(ledger_path)
+            claim = ledger.add_claim(
+                title="Reject unsafe bridge before launch",
+                statement="Unsafe train.py drafts should be blocked before execution.",
+                novelty=0.9,
+                falsifiability=0.8,
+            )
+            method_path = root / "method.md"
+            method_path.write_text("Implement risky adaptive scaling.\n", encoding="utf-8")
+            ledger.add_artifact(
+                claim_id=claim.id,
+                kind="method",
+                title="Denario method",
+                content=method_path.read_text(encoding="utf-8"),
+                source_type="denario",
+                source_path=str(method_path),
+            )
+
+            home = root / "home"
+            (home / ".cache" / "autoresearch").mkdir(parents=True, exist_ok=True)
+            train_path = config.autoresearch_repo / "train.py"
+            original_train = "print('original train')\n"
+            train_path.write_text(original_train, encoding="utf-8")
+
+            def fake_runner(command: ExternalCommand) -> CommandResult:
+                raise AssertionError("The GPU runner should not be called when review rejects the bridge.")
+
+            def fake_which(binary: str) -> str | None:
+                mapping = {
+                    "git": "/usr/bin/git",
+                    "nvidia-smi": "/usr/bin/nvidia-smi",
+                }
+                return mapping.get(binary)
+
+            with patch("pathlib.Path.home", return_value=home), patch(
+                "aieq_core.runtime.shutil.which",
+                side_effect=fake_which,
+            ), patch.object(
+                ResearchOrchestrator,
+                "_build_method_bridge",
+                return_value=MethodBridgeDraft(
+                    model="gpt-4.1",
+                    prompt="initial bridge prompt",
+                    summary="Initial bridge.",
+                    train_py="print('unsafe bridge')\n",
+                    response_id="resp_initial",
+                    usage={"input_tokens": 10, "output_tokens": 20},
+                    raw_response={"id": "resp_initial"},
+                ),
+            ), patch.object(
+                ResearchOrchestrator,
+                "_review_method_bridge",
+                return_value=MethodBridgeReview(
+                    model="gpt-4.1",
+                    prompt="review prompt",
+                    approved=False,
+                    summary="Candidate still references undefined symbols.",
+                    blockers=["Potential undefined name: dmodel_lr_scale"],
+                    warnings=["Large rewrite scope."],
+                    response_id="resp_review_reject",
+                    usage={"input_tokens": 8, "output_tokens": 12},
+                    raw_response={"id": "resp_review_reject"},
+                ),
+            ):
+                orchestrator = ResearchOrchestrator(config=config, command_runner=fake_runner)
+                payload = orchestrator.run_next(ledger_path)
+
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["result"]["blocked"], "bridge_review_rejected")
+            self.assertEqual(train_path.read_text(encoding="utf-8"), original_train)
+            self.assertFalse(payload["result"]["bridge"]["review"]["approved"])
+
+            snapshot = EpistemicLedger.load(ledger_path).claim_snapshot(claim.id)
+            execution = snapshot["executions"][-1]
+            self.assertEqual(execution["status"], "skipped")
+            self.assertEqual(
+                execution["metadata"]["status"],
+                "bridge_review_rejected",
             )
 
 

@@ -14,7 +14,12 @@ from .adapters.autoresearch import AutoresearchAdapter
 from .adapters.denario import DenarioAdapter
 from .controller import ResearchController
 from .ledger import EpistemicLedger
-from .method_bridge import MethodBridgeDraft, MethodBridgeError, OpenAIMethodBridge
+from .method_bridge import (
+    MethodBridgeDraft,
+    MethodBridgeError,
+    MethodBridgeReview,
+    OpenAIMethodBridge,
+)
 from .models import ActionProposal, ActionType, ExecutionStatus, serialize_dataclass
 from .runtime import RuntimeConfig, capability_key_for_action, doctor_report
 
@@ -411,11 +416,12 @@ class ResearchOrchestrator:
         claim = ledger.get_claim(proposal.claim_id)
         branch = self._resolve_autoresearch_branch(claim)
         execution_dir = self.config.execution_dir(decision_id)
-        run_log = execution_dir / "autoresearch-run.log"
         remote_host = self.config.autoresearch_remote_host if self.config.use_remote_autoresearch() else ""
         bridge_metadata: dict[str, Any] | None = None
         bridge_artifact_paths: list[str] = []
         original_train_py = ""
+        final_run_log = execution_dir / "autoresearch-run.log"
+        total_runtime_seconds = 0.0
 
         method_artifact = self._latest_method_artifact_for_claim(ledger=ledger, claim_id=claim.id)
         try:
@@ -426,32 +432,101 @@ class ResearchOrchestrator:
                     method_artifact=method_artifact,
                     current_train_py=original_train_py,
                 )
-                bridge_metadata, bridge_artifact_paths = self._persist_method_bridge_artifacts(
-                    execution_dir=execution_dir,
-                    method_artifact=method_artifact,
-                    original_train_py=original_train_py,
-                    bridge=bridge,
-                )
-                self._write_autoresearch_train_py(bridge.train_py)
+                bridge_attempts: list[dict[str, Any]] = []
+                result: CommandResult | None = None
+                runtime_error_excerpt = ""
+                max_attempts = 2
 
-            started = time.monotonic()
-            result = self.command_runner(
-                ExternalCommand(
-                    args=self._autoresearch_command(),
-                    cwd=self.config.repo_root if remote_host else self.config.autoresearch_repo,
-                    env=self.config.subprocess_env(),
-                    timeout_seconds=self.config.autoresearch_timeout_seconds,
-                    capture_output=False,
-                    stdout_path=str(run_log),
-                    stderr_path=str(run_log),
-                    combine_output=True,
+                for attempt_index in range(1, max_attempts + 1):
+                    review = self._review_method_bridge(
+                        claim=claim,
+                        method_artifact=method_artifact,
+                        current_train_py=original_train_py,
+                        bridge=bridge,
+                    )
+                    attempt_metadata, attempt_artifacts = self._persist_method_bridge_artifacts(
+                        execution_dir=execution_dir,
+                        method_artifact=method_artifact,
+                        original_train_py=original_train_py,
+                        bridge=bridge,
+                        review=review,
+                        attempt_index=attempt_index,
+                        runtime_error_excerpt=runtime_error_excerpt,
+                    )
+                    bridge_attempts.append(attempt_metadata)
+                    bridge_artifact_paths.extend(attempt_artifacts)
+
+                    if not review.approved:
+                        bridge_metadata = self._combine_bridge_attempts(bridge_attempts)
+                        blocker_suffix = (
+                            f" Blockers: {'; '.join(review.blockers)}."
+                            if review.blockers
+                            else ""
+                        )
+                        notes = (
+                            "Bridge review rejected execution before launch: "
+                            f"{review.summary}.{blocker_suffix}"
+                        )
+                        execution = ledger.record_execution(
+                            decision_id=decision_id,
+                            status=ExecutionStatus.SKIPPED,
+                            notes=notes,
+                            artifact_paths=bridge_artifact_paths,
+                            metadata={
+                                "runner": "orchestrator",
+                                "status": "bridge_review_rejected",
+                                "bridge": bridge_metadata or {},
+                            },
+                        )
+                        return {
+                            "ok": False,
+                            "action": proposal.action_type.value,
+                            "branch": branch,
+                            "mode": "remote" if remote_host else "local",
+                            "host": remote_host,
+                            "blocked": "bridge_review_rejected",
+                            "bridge": bridge_metadata,
+                            "execution": serialize_dataclass(execution),
+                        }
+
+                    self._write_autoresearch_train_py(bridge.train_py)
+
+                    attempt_run_log = self._attempt_run_log_path(
+                        execution_dir=execution_dir,
+                        attempt_index=attempt_index,
+                    )
+                    result, attempt_runtime_seconds = self._run_autoresearch_once(
+                        remote_host=remote_host,
+                        run_log=attempt_run_log,
+                    )
+                    total_runtime_seconds += attempt_runtime_seconds
+                    bridge_artifact_paths.append(str(attempt_run_log))
+                    final_run_log = attempt_run_log
+
+                    if result.returncode == 0 or attempt_index == max_attempts:
+                        break
+
+                    runtime_error_excerpt = self._runtime_failure_excerpt(attempt_run_log)
+                    bridge = self._repair_method_bridge_after_runtime_failure(
+                        claim=claim,
+                        method_artifact=method_artifact,
+                        failed_bridge=bridge,
+                        runtime_error_excerpt=runtime_error_excerpt,
+                    )
+
+                if result is None:
+                    raise RuntimeError("Autoresearch bridge loop failed to execute any attempts.")
+                bridge_metadata = self._combine_bridge_attempts(bridge_attempts)
+            else:
+                result, total_runtime_seconds = self._run_autoresearch_once(
+                    remote_host=remote_host,
+                    run_log=final_run_log,
                 )
-            )
-            runtime_seconds = round(time.monotonic() - started, 3)
         finally:
             if original_train_py:
                 self._write_autoresearch_train_py(original_train_py)
 
+        runtime_seconds = round(total_runtime_seconds, 3)
         commit = self._autoresearch_revision()
         description = f"{proposal.action_type.value} for {claim.title}"
         baseline_bpb = self._baseline_bpb_for_branch(claim=claim, branch=branch)
@@ -474,7 +549,7 @@ class ResearchOrchestrator:
                     evidence=AutoresearchAdapter.import_run(
                         ledger=ledger,
                         claim_id=claim.id,
-                        run_log_path=run_log,
+                        run_log_path=final_run_log,
                         commit=commit,
                         branch=branch,
                         description=description,
@@ -505,7 +580,7 @@ class ResearchOrchestrator:
                 "branch": branch,
                 "mode": "remote" if remote_host else "local",
                 "host": remote_host,
-                "run_log_path": str(run_log),
+                "run_log_path": str(final_run_log),
                 "results_tsv_path": str(results_tsv_path),
                 "bridge": bridge_metadata,
                 "imported_run": imported_run,
@@ -513,7 +588,7 @@ class ResearchOrchestrator:
                 "execution": execution,
             }
 
-        parsed_run = AutoresearchAdapter.parse_run_log(run_log)
+        parsed_run = AutoresearchAdapter.parse_run_log(final_run_log)
         status = self._infer_autoresearch_status(
             baseline_bpb=baseline_bpb,
             val_bpb=parsed_run.val_bpb,
@@ -534,7 +609,7 @@ class ResearchOrchestrator:
                 evidence=AutoresearchAdapter.import_run(
                     ledger=ledger,
                     claim_id=claim.id,
-                    run_log_path=run_log,
+                    run_log_path=final_run_log,
                     commit=commit,
                     branch=branch,
                     description=description,
@@ -569,7 +644,7 @@ class ResearchOrchestrator:
             "commit": commit,
             "status": status,
             "runtime_seconds": runtime_seconds,
-            "run_log_path": str(run_log),
+            "run_log_path": str(final_run_log),
             "results_tsv_path": str(results_tsv_path),
             "bridge": bridge_metadata,
             "imported_run": imported_run,
@@ -722,18 +797,87 @@ class ResearchOrchestrator:
             )
 
         method_text = self._resolve_method_text(method_artifact)
-        bridge = OpenAIMethodBridge(
-            api_key=api_key,
-            model=self.config.method_bridge_model,
-            timeout_seconds=self.config.method_bridge_timeout_seconds,
-            base_url=self.config.env.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-        )
+        bridge = self._method_bridge_client(api_key=api_key)
         try:
             return bridge.generate(
                 claim_title=claim.title,
                 claim_statement=claim.statement,
                 method_text=method_text,
                 current_train_py=current_train_py,
+            )
+        except MethodBridgeError as exc:
+            raise UnsupportedAutomatedActionError(str(exc)) from exc
+
+    def _review_method_bridge(
+        self,
+        *,
+        claim: Any,
+        method_artifact: Any,
+        current_train_py: str,
+        bridge: MethodBridgeDraft,
+    ) -> MethodBridgeReview:
+        if not self.config.method_bridge_enabled:
+            raise UnsupportedAutomatedActionError(
+                "Method bridge is disabled for run_experiment."
+            )
+
+        api_key = self.config.env.get("OPENAI_API_KEY", "").strip()
+        if not api_key:
+            raise UnsupportedAutomatedActionError(
+                "Method bridge requires OPENAI_API_KEY."
+            )
+
+        method_text = self._resolve_method_text(method_artifact)
+        reviewer = self._method_bridge_client(api_key=api_key)
+        try:
+            return reviewer.review(
+                claim_title=claim.title,
+                claim_statement=claim.statement,
+                method_text=method_text,
+                current_train_py=current_train_py,
+                generated_train_py=bridge.train_py,
+                generated_summary=bridge.summary,
+            )
+        except MethodBridgeError as exc:
+            raise UnsupportedAutomatedActionError(str(exc)) from exc
+
+    def _method_bridge_client(self, *, api_key: str) -> OpenAIMethodBridge:
+        return OpenAIMethodBridge(
+            api_key=api_key,
+            model=self.config.method_bridge_model,
+            timeout_seconds=self.config.method_bridge_timeout_seconds,
+            base_url=self.config.env.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        )
+
+    def _repair_method_bridge_after_runtime_failure(
+        self,
+        *,
+        claim: Any,
+        method_artifact: Any,
+        failed_bridge: MethodBridgeDraft,
+        runtime_error_excerpt: str,
+    ) -> MethodBridgeDraft:
+        if not self.config.method_bridge_enabled:
+            raise UnsupportedAutomatedActionError(
+                "Method bridge is disabled for run_experiment."
+            )
+
+        api_key = self.config.env.get("OPENAI_API_KEY", "").strip()
+        if not api_key:
+            raise UnsupportedAutomatedActionError(
+                "Method bridge requires OPENAI_API_KEY."
+            )
+
+        method_text = self._resolve_method_text(method_artifact)
+        bridge = self._method_bridge_client(api_key=api_key)
+        try:
+            return bridge.repair_runtime_failure(
+                claim_title=claim.title,
+                claim_statement=claim.statement,
+                method_text=method_text,
+                previous_train_py=failed_bridge.train_py,
+                runtime_error=runtime_error_excerpt,
+                previous_summary=failed_bridge.summary,
             )
         except MethodBridgeError as exc:
             raise UnsupportedAutomatedActionError(str(exc)) from exc
@@ -754,11 +898,18 @@ class ResearchOrchestrator:
         method_artifact: Any,
         original_train_py: str,
         bridge: MethodBridgeDraft,
+        review: MethodBridgeReview | None = None,
+        attempt_index: int = 1,
+        runtime_error_excerpt: str = "",
     ) -> tuple[dict[str, Any], list[str]]:
-        prompt_path = execution_dir / "train-bridge.prompt.txt"
-        response_path = execution_dir / "train-bridge.response.json"
-        original_path = execution_dir / "train-bridge.original.py"
-        bridged_path = execution_dir / "train-bridge.generated.py"
+        suffix = "" if attempt_index == 1 else f".attempt-{attempt_index}"
+        prompt_path = execution_dir / f"train-bridge{suffix}.prompt.txt"
+        response_path = execution_dir / f"train-bridge{suffix}.response.json"
+        original_path = execution_dir / f"train-bridge{suffix}.original.py"
+        bridged_path = execution_dir / f"train-bridge{suffix}.generated.py"
+        review_prompt_path = execution_dir / f"train-bridge{suffix}.review.prompt.txt"
+        review_response_path = execution_dir / f"train-bridge{suffix}.review.response.json"
+        runtime_error_path = execution_dir / f"train-bridge{suffix}.runtime-error.txt"
 
         prompt_path.write_text(bridge.prompt, encoding="utf-8")
         response_path.write_text(
@@ -767,9 +918,26 @@ class ResearchOrchestrator:
         )
         original_path.write_text(original_train_py, encoding="utf-8")
         bridged_path.write_text(bridge.train_py, encoding="utf-8")
+        artifact_paths = [
+            str(prompt_path),
+            str(response_path),
+            str(original_path),
+            str(bridged_path),
+        ]
+        if review is not None:
+            review_prompt_path.write_text(review.prompt, encoding="utf-8")
+            review_response_path.write_text(
+                json.dumps(review.raw_response, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            artifact_paths.extend([str(review_prompt_path), str(review_response_path)])
+        if runtime_error_excerpt:
+            runtime_error_path.write_text(runtime_error_excerpt, encoding="utf-8")
+            artifact_paths.append(str(runtime_error_path))
 
         metadata = {
             "applied": True,
+            "attempt": attempt_index,
             "model": bridge.model,
             "response_id": bridge.response_id,
             "summary": bridge.summary,
@@ -780,13 +948,17 @@ class ResearchOrchestrator:
             "response_path": str(response_path),
             "original_train_path": str(original_path),
             "generated_train_path": str(bridged_path),
+            "repair_source": "runtime_failure" if runtime_error_excerpt else "initial",
         }
-        return metadata, [
-            str(prompt_path),
-            str(response_path),
-            str(original_path),
-            str(bridged_path),
-        ]
+        if review is not None:
+            metadata["review"] = {
+                **review.as_metadata(),
+                "prompt_path": str(review_prompt_path),
+                "response_path": str(review_response_path),
+            }
+        if runtime_error_excerpt:
+            metadata["runtime_error_path"] = str(runtime_error_path)
+        return metadata, artifact_paths
 
     def _annotate_autoresearch_import(
         self,
@@ -804,6 +976,61 @@ class ResearchOrchestrator:
             ledger.executions[execution_id].metadata["bridge"] = dict(bridge_metadata)
         ledger.save()
         return evidence
+
+    @staticmethod
+    def _combine_bridge_attempts(attempts: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if not attempts:
+            return None
+        combined = dict(attempts[-1])
+        combined["attempt_count"] = len(attempts)
+        combined["runtime_repair_applied"] = len(attempts) > 1
+        combined["attempts"] = [dict(item) for item in attempts]
+        return combined
+
+    def _run_autoresearch_once(
+        self,
+        *,
+        remote_host: str,
+        run_log: Path,
+    ) -> tuple[CommandResult, float]:
+        started = time.monotonic()
+        result = self.command_runner(
+            ExternalCommand(
+                args=self._autoresearch_command(),
+                cwd=self.config.repo_root if remote_host else self.config.autoresearch_repo,
+                env=self.config.subprocess_env(),
+                timeout_seconds=self.config.autoresearch_timeout_seconds,
+                capture_output=False,
+                stdout_path=str(run_log),
+                stderr_path=str(run_log),
+                combine_output=True,
+            )
+        )
+        return result, round(time.monotonic() - started, 3)
+
+    @staticmethod
+    def _attempt_run_log_path(
+        *,
+        execution_dir: Path,
+        attempt_index: int,
+    ) -> Path:
+        if attempt_index == 1:
+            return execution_dir / "autoresearch-run.log"
+        return execution_dir / f"autoresearch-run.attempt-{attempt_index}.log"
+
+    @staticmethod
+    def _runtime_failure_excerpt(
+        run_log: Path,
+        *,
+        line_limit: int = 120,
+        char_limit: int = 12000,
+    ) -> str:
+        text = run_log.read_text(encoding="utf-8", errors="replace")
+        lines = text.splitlines()
+        excerpt = "\n".join(lines[-line_limit:])
+        if len(excerpt) > char_limit:
+            excerpt = excerpt[-char_limit:]
+        return excerpt.strip()
 
     def _read_autoresearch_train_py(self) -> str:
         if self.config.use_remote_autoresearch():
