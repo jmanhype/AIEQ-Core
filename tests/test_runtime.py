@@ -195,6 +195,7 @@ class RuntimeDoctorTests(unittest.TestCase):
                 report = doctor_report(config)
 
             self.assertTrue(report["capabilities"]["generate_hypotheses"]["available"])
+            self.assertTrue(report["capabilities"]["compile_protocol"]["available"])
             self.assertTrue(report["capabilities"]["design_mutation"]["available"])
             self.assertTrue(report["capabilities"]["run_eval"]["available"])
             self.assertTrue(report["capabilities"]["promote_winner"]["available"])

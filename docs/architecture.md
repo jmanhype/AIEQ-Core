@@ -59,11 +59,12 @@ That now exists as an intake layer with three responsibilities:
 
 1. ingest arbitrary input as an `InputArtifact`
 2. generate ranked `InnovationHypothesis` records from that input
-3. materialize the strongest hypothesis into a real claim and, when possible, a real optimization target
+3. compile the strongest hypothesis into a grounded `ProtocolDraft`
+4. materialize that protocol into a real claim and, when possible, a real optimization target plus eval suite
 
 This separation is intentional:
 
-- intake is allowed to stop at a claim if the artifact is still too abstract
+- protocol compilation is allowed to stop at a blocked draft if the artifact or eval is still too abstract
 - optimization only starts once the claim resolves to something mutable and measurable
 
 ## Proposed control loop
@@ -127,11 +128,11 @@ The current codebase now contains:
 - `src/aieq_core/ledger.py`
   - persistent JSON ledger
 - `src/aieq_core/models.py`
-  - typed schema for claims, assumptions, evidence, attacks, artifacts, inputs, innovation hypotheses, actions, targets, eval suites, mutation candidates, and eval runs
+  - typed schema for claims, assumptions, evidence, attacks, artifacts, inputs, innovation hypotheses, protocol drafts, actions, targets, eval suites, mutation candidates, and eval runs
 - `src/aieq_core/policy.py`
   - expected-information-gain ranking policy
 - `src/aieq_core/intake.py`
-  - arbitrary-input ingestion, ranked hypothesis generation, and hypothesis materialization
+  - arbitrary-input ingestion, ranked hypothesis generation, protocol compilation, and protocol materialization
 - `src/aieq_core/modes/`
   - pluggable mode adapters for `ml_research` and `skill_optimizer`
 - `src/aieq_core/cli.py`
@@ -211,6 +212,7 @@ That means `AIEQ-Core` can expose one command surface while still preserving:
 The execution plane currently automates:
 
 - intake `generate_hypotheses`
+- intake `compile_protocol`
 - Denario `generate_idea`
 - Denario `generate_method`
 - Denario `synthesize_paper`

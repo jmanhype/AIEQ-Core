@@ -15,7 +15,7 @@ from aieq_core.ledger import EpistemicLedger
 
 
 class CLIModeTests(unittest.TestCase):
-    def test_mode_list_reports_ml_and_skill_modes(self) -> None:
+    def test_mode_list_reports_ml_skill_and_repo_benchmark_modes(self) -> None:
         buffer = io.StringIO()
         with redirect_stdout(buffer):
             exit_code = main(["mode", "list"])
@@ -25,6 +25,7 @@ class CLIModeTests(unittest.TestCase):
         mode_names = {item["name"] for item in payload["modes"]}
         self.assertIn("ml_research", mode_names)
         self.assertIn("skill_optimizer", mode_names)
+        self.assertIn("repo_benchmark", mode_names)
 
     def test_target_and_eval_register_commands_create_skill_optimizer_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

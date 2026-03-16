@@ -168,6 +168,137 @@ class ResearchOrchestratorTests(unittest.TestCase):
             self.assertEqual(snapshot["metrics"]["promoted_candidate_count"], 1)
             self.assertGreaterEqual(snapshot["metrics"]["optimization_best_score"], 1.0)
 
+    def test_run_next_executes_repo_benchmark_mode_end_to_end(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = make_runtime_config(root, openai_key=True)
+            ledger_path = root / "ledger.json"
+            repo_root = root / "repo"
+            repo_root.mkdir()
+            target_path = repo_root / "policy.txt"
+            target_path.write_text(
+                "Answer in a long, extremely verbose paragraph and avoid mentioning the refund policy unless the user explicitly asks for it in detail.\n",
+                encoding="utf-8",
+            )
+
+            ledger = EpistemicLedger.load(ledger_path)
+            claim = ledger.add_claim(
+                title="Optimize repo prompt policy",
+                statement="Shorter policy should preserve the key refund instruction.",
+                metadata={"mode": "repo_benchmark"},
+            )
+            target = ledger.register_target(
+                claim_id=claim.id,
+                mode="repo_benchmark",
+                target_type="file",
+                title="Repo policy",
+                content=target_path.read_text(encoding="utf-8"),
+                source_type="file",
+                source_path=str(target_path),
+                invariant_constraints={"required_phrases": ["refund"]},
+            )
+            ledger.register_eval_suite(
+                claim_id=claim.id,
+                target_id=target.id,
+                name="repo-benchmark-suite",
+                compatible_target_type="file",
+                pass_threshold=0.9,
+                repetitions=1,
+                cases=[
+                    {
+                        "id": "baseline",
+                        "role": "baseline",
+                        "shell": True,
+                        "cwd": ".",
+                        "command": (
+                            "python3 -c \"import json, pathlib; "
+                            "text = pathlib.Path('policy.txt').read_text(); "
+                            "print(json.dumps({'length': len(text), 'has_refund': float('refund' in text.lower())}))\""
+                        ),
+                        "parser": "json_stdout",
+                    },
+                    {
+                        "id": "candidate-shorter",
+                        "role": "candidate",
+                        "shell": True,
+                        "cwd": ".",
+                        "command": (
+                            "python3 -c \"import json, pathlib; "
+                            "text = pathlib.Path('policy.txt').read_text(); "
+                            "print(json.dumps({'length': len(text), 'has_refund': float('refund' in text.lower())}))\""
+                        ),
+                        "parser": "json_stdout",
+                        "checks": [
+                            {
+                                "type": "baseline_reduction_gte",
+                                "key": "length",
+                                "baseline_key": "length",
+                                "value": 0.2,
+                            },
+                            {
+                                "type": "gte",
+                                "key": "has_refund",
+                                "value": 1.0,
+                            },
+                        ],
+                    },
+                ],
+            )
+
+            class FakeSkillClient:
+                def mutate(self, **_: object) -> PromptMutationDraft:
+                    return PromptMutationDraft(
+                        model="gpt-5-mini",
+                        prompt="mutation prompt",
+                        summary="Make the policy shorter and explicitly mention refunds.",
+                        content="Answer briefly and mention the refund policy.",
+                        response_id="resp_mutation_repo",
+                        usage={"total_tokens": 90},
+                        raw_response={"id": "resp_mutation_repo"},
+                    )
+
+                def review(self, **_: object) -> PromptMutationReview:
+                    return PromptMutationReview(
+                        model="gpt-5-mini",
+                        prompt="review prompt",
+                        approved=True,
+                        summary="Looks safe for repo benchmark execution.",
+                        blockers=[],
+                        warnings=[],
+                        response_id="resp_review_repo",
+                        usage={"total_tokens": 60},
+                        raw_response={"id": "resp_review_repo"},
+                    )
+
+                def evaluate_case(self, **_: object) -> PromptEvalResponse:
+                    raise AssertionError("repo_benchmark should not use the LLM eval path")
+
+            with patch(
+                "aieq_core.modes.skill_optimizer.SkillOptimizerMode._client",
+                return_value=FakeSkillClient(),
+            ):
+                orchestrator = ResearchOrchestrator(config=config)
+                mutation_payload = orchestrator.run_next(ledger_path, mode="repo_benchmark")
+                eval_payload = orchestrator.run_next(ledger_path, mode="repo_benchmark")
+                promote_payload = orchestrator.run_next(ledger_path, mode="repo_benchmark")
+
+            self.assertTrue(mutation_payload["ok"])
+            self.assertEqual(mutation_payload["result"]["action"], "design_mutation")
+            self.assertTrue(eval_payload["ok"])
+            self.assertEqual(eval_payload["result"]["action"], "run_eval")
+            self.assertTrue(promote_payload["ok"])
+            self.assertEqual(promote_payload["result"]["action"], "promote_winner")
+            self.assertEqual(
+                target_path.read_text(encoding="utf-8"),
+                "Answer in a long, extremely verbose paragraph and avoid mentioning the refund policy unless the user explicitly asks for it in detail.\n",
+            )
+
+            snapshot = EpistemicLedger.load(ledger_path).claim_snapshot(claim.id)
+            self.assertEqual(snapshot["claim"]["metadata"]["mode"], "repo_benchmark")
+            self.assertEqual(snapshot["metrics"]["mutation_candidate_count"], 1)
+            self.assertEqual(snapshot["metrics"]["promoted_candidate_count"], 1)
+            self.assertGreaterEqual(snapshot["metrics"]["optimization_best_score"], 1.0)
+
     def test_run_next_bootstraps_denario_project_and_imports_claim(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

@@ -454,6 +454,7 @@ class SkillOptimizerMode(ModeAdapter):
     name = "skill_optimizer"
     label = "Skill Optimizer"
     description = "Generic prompt/skill optimization mode with LLM mutation, invariant review, and repeated eval suites."
+    executor = ActionExecutor.SKILL_OPTIMIZER
 
     def bootstrap_proposal(self, *, ledger: Any) -> ActionProposal | None:
         return None
@@ -488,7 +489,7 @@ class SkillOptimizerMode(ModeAdapter):
                     expected_information_gain=0.6,
                     priority="next",
                     reason="The target exists, but no eval suite is registered yet.",
-                    executor=ActionExecutor.SKILL_OPTIMIZER,
+                    executor=self.executor,
                     mode=self.name,
                     stage="setup",
                     command_hint=(
@@ -509,7 +510,7 @@ class SkillOptimizerMode(ModeAdapter):
                     expected_information_gain=score,
                     priority=self._priority(score),
                     reason="No approved mutation candidate exists yet for this target.",
-                    executor=ActionExecutor.SKILL_OPTIMIZER,
+                    executor=self.executor,
                     mode=self.name,
                     stage="mutation",
                     command_hint=(
@@ -534,7 +535,7 @@ class SkillOptimizerMode(ModeAdapter):
                     expected_information_gain=score,
                     priority=self._priority(score),
                     reason="An approved mutation candidate is waiting for repeated eval runs.",
-                    executor=ActionExecutor.SKILL_OPTIMIZER,
+                    executor=self.executor,
                     mode=self.name,
                     stage="evaluation",
                     command_hint=(
@@ -555,7 +556,7 @@ class SkillOptimizerMode(ModeAdapter):
                         expected_information_gain=score,
                         priority=self._priority(score),
                         reason="The best evaluated candidate cleared the configured threshold and can be promoted.",
-                        executor=ActionExecutor.SKILL_OPTIMIZER,
+                        executor=self.executor,
                         mode=self.name,
                         stage="promotion",
                         command_hint=(
@@ -580,7 +581,7 @@ class SkillOptimizerMode(ModeAdapter):
                     expected_information_gain=score,
                     priority=self._priority(score),
                     reason="Recent evaluated candidates are not materially improving the score.",
-                    executor=ActionExecutor.SKILL_OPTIMIZER,
+                    executor=self.executor,
                     mode=self.name,
                     stage="analysis",
                     command_hint=(
@@ -599,7 +600,7 @@ class SkillOptimizerMode(ModeAdapter):
                     expected_information_gain=score,
                     priority=self._priority(score),
                     reason="The next best move is to propose another candidate mutation.",
-                    executor=ActionExecutor.SKILL_OPTIMIZER,
+                    executor=self.executor,
                     mode=self.name,
                     stage="mutation",
                     command_hint=(
@@ -624,27 +625,27 @@ class SkillOptimizerMode(ModeAdapter):
             "capabilities": {
                 "design_mutation": {
                     "action": "design_mutation",
-                    "executor": "skill_optimizer",
+                    "executor": self.executor.value,
                     "available": available,
                     "blocked_by": blocked_by,
                     "model": config.skill_mutation_model,
                 },
                 "run_eval": {
                     "action": "run_eval",
-                    "executor": "skill_optimizer",
+                    "executor": self.executor.value,
                     "available": available,
                     "blocked_by": blocked_by,
                     "model": config.skill_eval_model,
                 },
                 "promote_winner": {
                     "action": "promote_winner",
-                    "executor": "skill_optimizer",
+                    "executor": self.executor.value,
                     "available": True,
                     "blocked_by": [],
                 },
                 "analyze_failure": {
                     "action": "analyze_failure",
-                    "executor": "skill_optimizer",
+                    "executor": self.executor.value,
                     "available": True,
                     "blocked_by": [],
                 },
@@ -1087,11 +1088,10 @@ class SkillOptimizerMode(ModeAdapter):
             base_url=orchestrator.config.env.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
         )
 
-    @staticmethod
-    def _latest_target(*, ledger: Any, claim_id: str) -> Any:
-        targets = [item for item in ledger.targets_for_claim(claim_id) if item.mode == "skill_optimizer"]
+    def _latest_target(self, *, ledger: Any, claim_id: str) -> Any:
+        targets = [item for item in ledger.targets_for_claim(claim_id) if item.mode == self.name]
         if not targets:
-            raise SkillOptimizerError("No skill-optimizer target is registered for this claim.")
+            raise SkillOptimizerError(f"No {self.name} target is registered for this claim.")
         return sorted(targets, key=lambda item: item.updated_at)[-1]
 
     @staticmethod

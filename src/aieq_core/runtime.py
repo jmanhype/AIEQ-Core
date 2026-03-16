@@ -622,6 +622,14 @@ def doctor_report(
             "model": config.intake_hypothesis_model,
             "provider": intake_provider,
         },
+        "compile_protocol": {
+            "action": "compile_protocol",
+            "executor": "aieq_core",
+            "available": not intake_blockers,
+            "blocked_by": intake_blockers,
+            "model": config.intake_hypothesis_model,
+            "provider": intake_provider,
+        },
         "run_eval": {
             "action": "run_eval",
             "executor": "skill_optimizer",

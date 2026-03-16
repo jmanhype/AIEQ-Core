@@ -24,7 +24,8 @@ On top of those modes, the repo now has an **intake layer** for arbitrary input:
 
 - register a repo, document, prompt, or inline text as an input artifact
 - generate ranked feature or optimization hypotheses from that input
-- materialize the best hypothesis into a real claim and, when possible, a real target
+- compile the best hypothesis into a grounded protocol draft
+- materialize that protocol into a real claim and, when possible, a real target plus eval suite
 
 The name comes from **Axiomatic Inversion & Epistemic Quarantine**:
 
@@ -91,9 +92,9 @@ The repo now contains both the reusable kernel and the first mode split:
   - typed schema for claims, assumptions, evidence, attacks, artifacts, ranked actions, and generic optimization entities such as targets, eval suites, mutation candidates, and eval runs
 - `src/aieq_core/ledger.py`
   - persistent JSON ledger with derived belief/status updates
-  - now includes first-class inputs, innovation hypotheses, optimization targets, mutation candidates, eval suites, eval runs, and existing method/paper artifacts
+  - now includes first-class inputs, innovation hypotheses, protocol drafts, optimization targets, mutation candidates, eval suites, eval runs, and existing method/paper artifacts
 - `src/aieq_core/intake.py`
-  - Denario-style intake layer that turns arbitrary input into ranked, testable hypotheses and can materialize those hypotheses into real claims and targets
+  - Denario-style intake layer that turns arbitrary input into ranked, testable hypotheses, compiles grounded protocol drafts, and can materialize those protocols into real claims and targets
 - `src/aieq_core/policy.py`
   - action ranking based on expected information gain
 - `src/aieq_core/modes/`
@@ -152,6 +153,7 @@ The current execution plane automates:
 - `synthesize_paper` via Denario
 - `run_experiment` and `reproduce_result` via `autoresearch`
 - `generate_hypotheses` via the intake layer
+- `compile_protocol` via the intake layer
 - `design_mutation`, `run_eval`, `analyze_failure`, and `promote_winner` for `skill_optimizer`
 
 It does this without collapsing the upstream repos into one monolith:
@@ -297,18 +299,32 @@ PYTHONPATH=src python -m aieq_core.cli generate-hypotheses data/ledger.json \
   --count 5
 ```
 
-Materialize the best hypothesis into a real claim and, when possible, a
-`skill_optimizer` target:
+Compile the best hypothesis into a grounded protocol draft:
 
 ```bash
-PYTHONPATH=src python -m aieq_core.cli materialize-target data/ledger.json \
+PYTHONPATH=src python -m aieq_core.cli compile-protocol data/ledger.json \
   --hypothesis-id <hypothesis-id>
 ```
 
-For repo-shaped inputs, materialization may stop at a claim if the hypothesis
-does not yet resolve to a concrete mutable file or prompt. That is intentional:
-the intake layer is allowed to say “this idea is promising, but you still need
-to extract the artifact before optimization can begin.”
+Inspect that protocol:
+
+```bash
+PYTHONPATH=src python -m aieq_core.cli protocol show data/ledger.json \
+  --protocol-id <protocol-id>
+```
+
+Materialize the protocol into a real claim and, when possible, a
+`skill_optimizer` target plus compiled eval suite:
+
+```bash
+PYTHONPATH=src python -m aieq_core.cli materialize-protocol data/ledger.json \
+  --protocol-id <protocol-id>
+```
+
+For repo-shaped or vague inputs, compilation may stop at a blocked protocol or
+at a claim-only path if the artifact is still too abstract. That is
+intentional: the intake layer is allowed to say “this idea is promising, but
+you still need to extract the artifact before optimization can begin.”
 
 Or promote the current best evaluated candidate:
 

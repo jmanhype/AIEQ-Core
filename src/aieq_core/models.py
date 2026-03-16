@@ -58,6 +58,7 @@ class ActionExecutor(str, Enum):
     DENARIO = "denario"
     AUTORESEARCH = "autoresearch"
     SKILL_OPTIMIZER = "skill_optimizer"
+    REPO_BENCHMARK = "repo_benchmark"
     MANUAL = "manual"
 
 
@@ -88,6 +89,13 @@ class HypothesisStatus(str, Enum):
     DISMISSED = "dismissed"
 
 
+class ProtocolDraftStatus(str, Enum):
+    DRAFT = "draft"
+    BLOCKED = "blocked"
+    READY = "ready"
+    MATERIALIZED = "materialized"
+
+
 @dataclass(slots=True)
 class Claim:
     id: str
@@ -112,6 +120,7 @@ class Claim:
     eval_run_ids: list[str] = field(default_factory=list)
     input_ids: list[str] = field(default_factory=list)
     hypothesis_ids: list[str] = field(default_factory=list)
+    protocol_ids: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -240,6 +249,9 @@ class InnovationHypothesis:
     leverage: float = 0.5
     testability: float = 0.5
     novelty: float = 0.5
+    strategic_novelty: float = 0.5
+    domain_differentiation: float = 0.5
+    fork_specificity: float = 0.5
     optimization_readiness: float = 0.5
     overall_score: float = 0.0
     status: HypothesisStatus = HypothesisStatus.PROPOSED
@@ -252,8 +264,37 @@ class InnovationHypothesis:
         self.leverage = clamp(float(self.leverage))
         self.testability = clamp(float(self.testability))
         self.novelty = clamp(float(self.novelty))
+        self.strategic_novelty = clamp(float(self.strategic_novelty))
+        self.domain_differentiation = clamp(float(self.domain_differentiation))
+        self.fork_specificity = clamp(float(self.fork_specificity))
         self.optimization_readiness = clamp(float(self.optimization_readiness))
         self.overall_score = clamp(float(self.overall_score))
+
+
+@dataclass(slots=True)
+class ProtocolDraft:
+    id: str
+    input_id: str
+    hypothesis_id: str
+    recommended_mode: str = ""
+    status: ProtocolDraftStatus = ProtocolDraftStatus.DRAFT
+    artifact_candidates: list[dict[str, Any]] = field(default_factory=list)
+    target_spec: dict[str, Any] = field(default_factory=dict)
+    eval_plan: dict[str, Any] = field(default_factory=dict)
+    baseline_plan: dict[str, Any] = field(default_factory=dict)
+    blockers: list[str] = field(default_factory=list)
+    extraction_confidence: float = 0.0
+    eval_confidence: float = 0.0
+    execution_readiness: float = 0.0
+    materialized_claim_id: str = ""
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.extraction_confidence = clamp(float(self.extraction_confidence))
+        self.eval_confidence = clamp(float(self.eval_confidence))
+        self.execution_readiness = clamp(float(self.execution_readiness))
 
 
 @dataclass(slots=True)

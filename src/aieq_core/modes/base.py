@@ -85,6 +85,7 @@ class ModeRegistry:
 
 def default_mode_registry() -> ModeRegistry:
     from .ml_research import MLResearchMode
+    from .repo_benchmark import RepoBenchmarkMode
     from .skill_optimizer import SkillOptimizerMode
 
-    return ModeRegistry([MLResearchMode(), SkillOptimizerMode()])
+    return ModeRegistry([MLResearchMode(), RepoBenchmarkMode(), SkillOptimizerMode()])

@@ -63,6 +63,28 @@ def build_parser() -> argparse.ArgumentParser:
     rank_hypotheses.add_argument("--input-id", required=True)
     rank_hypotheses.add_argument("--limit", type=int, default=10)
 
+    compile_protocol = subparsers.add_parser(
+        "compile-protocol",
+        help="Compile a hypothesis into a grounded protocol draft",
+    )
+    compile_protocol.add_argument("ledger", help="Path to the ledger JSON file")
+    compile_protocol.add_argument("--hypothesis-id", required=True)
+    compile_protocol.add_argument("--env-file", default="")
+
+    protocol_parser = subparsers.add_parser("protocol", help="Inspect compiled protocol drafts")
+    protocol_subparsers = protocol_parser.add_subparsers(dest="protocol_command", required=True)
+    protocol_show = protocol_subparsers.add_parser("show", help="Show a stored protocol draft")
+    protocol_show.add_argument("ledger", help="Path to the ledger JSON file")
+    protocol_show.add_argument("--protocol-id", required=True)
+
+    materialize_protocol = subparsers.add_parser(
+        "materialize-protocol",
+        help="Turn a stored protocol draft into a claim and optional target/eval package",
+    )
+    materialize_protocol.add_argument("ledger", help="Path to the ledger JSON file")
+    materialize_protocol.add_argument("--protocol-id", required=True)
+    materialize_protocol.add_argument("--claim-only", action="store_true")
+
     materialize = subparsers.add_parser(
         "materialize-target",
         help="Turn a stored hypothesis into a real claim and optional optimization target",
@@ -381,6 +403,60 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
 
+    if args.command == "compile-protocol":
+        ledger = EpistemicLedger.load(args.ledger)
+        config = RuntimeConfig.load(env_file=args.env_file or None)
+        service = AIEQIntakeService(config=config)
+        payload = service.compile_protocol(
+            ledger=ledger,
+            hypothesis_id=args.hypothesis_id,
+        )
+        _emit(
+            {
+                "input": serialize_dataclass(payload["input"]),
+                "hypothesis": serialize_dataclass(payload["hypothesis"]),
+                "protocol": serialize_dataclass(payload["protocol"]),
+            }
+        )
+        return 0
+
+    if args.command == "protocol":
+        ledger = EpistemicLedger.load(args.ledger)
+        if args.protocol_command == "show":
+            protocol = ledger.get_protocol(args.protocol_id)
+            payload = {
+                "protocol": serialize_dataclass(protocol),
+                "input": serialize_dataclass(ledger.get_input(protocol.input_id)),
+                "hypothesis": serialize_dataclass(ledger.get_hypothesis(protocol.hypothesis_id)),
+            }
+            if protocol.materialized_claim_id:
+                payload["claim"] = ledger.claim_snapshot(protocol.materialized_claim_id)
+            _emit(payload)
+            return 0
+
+    if args.command == "materialize-protocol":
+        ledger = EpistemicLedger.load(args.ledger)
+        service = AIEQIntakeService(config=RuntimeConfig.load())
+        payload = service.materialize_protocol(
+            ledger=ledger,
+            protocol_id=args.protocol_id,
+            claim_only=args.claim_only,
+        )
+        _emit(
+            {
+                "claim": serialize_dataclass(payload["claim"]),
+                "target": serialize_dataclass(payload["target"]) if payload["target"] else None,
+                "eval_suite": (
+                    serialize_dataclass(payload["eval_suite"]) if payload["eval_suite"] else None
+                ),
+                "requires_target_registration": payload["requires_target_registration"],
+                "requires_eval_registration": payload["requires_eval_registration"],
+                "recommended_mode": payload["recommended_mode"],
+                "protocol": serialize_dataclass(payload["protocol"]),
+            }
+        )
+        return 0
+
     if args.command == "materialize-target":
         ledger = EpistemicLedger.load(args.ledger)
         service = AIEQIntakeService(config=RuntimeConfig.load())
@@ -410,8 +486,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "target":
         ledger = EpistemicLedger.load(args.ledger)
         if args.target_command == "register":
-            if args.mode != "skill_optimizer":
-                parser.error("target register currently supports --mode skill_optimizer only.")
+            if args.mode not in {"skill_optimizer", "repo_benchmark"}:
+                parser.error(
+                    "target register currently supports --mode skill_optimizer or --mode repo_benchmark only."
+                )
             content = _resolve_content(source_file=args.source_file, content=args.content)
             constraints = _load_json_file(args.constraint_file) if args.constraint_file else {}
             claim = (
@@ -446,8 +524,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "eval":
         ledger = EpistemicLedger.load(args.ledger)
         if args.eval_command == "register":
-            if args.mode != "skill_optimizer":
-                parser.error("eval register currently supports --mode skill_optimizer only.")
+            if args.mode not in {"skill_optimizer", "repo_benchmark"}:
+                parser.error(
+                    "eval register currently supports --mode skill_optimizer or --mode repo_benchmark only."
+                )
             suite_payload = _load_json_file(args.suite_file)
             suite = ledger.register_eval_suite(
                 claim_id=args.claim_id,

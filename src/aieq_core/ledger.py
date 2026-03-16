@@ -10,6 +10,7 @@ from .models import (
     Artifact,
     InputArtifact,
     InnovationHypothesis,
+    ProtocolDraft,
     ArtifactTarget,
     ArtifactKind,
     Attack,
@@ -24,6 +25,7 @@ from .models import (
     ExecutionRecord,
     ExecutionStatus,
     HypothesisStatus,
+    ProtocolDraftStatus,
     MutationCandidate,
     ReviewStatus,
     ActionExecutor,
@@ -34,7 +36,7 @@ from .models import (
     utc_now,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 
 
 class EpistemicLedger:
@@ -51,6 +53,7 @@ class EpistemicLedger:
         artifacts: dict[str, Artifact] | None = None,
         inputs: dict[str, InputArtifact] | None = None,
         hypotheses: dict[str, InnovationHypothesis] | None = None,
+        protocols: dict[str, ProtocolDraft] | None = None,
         targets: dict[str, ArtifactTarget] | None = None,
         eval_suites: dict[str, EvalSuite] | None = None,
         mutation_candidates: dict[str, MutationCandidate] | None = None,
@@ -66,6 +69,7 @@ class EpistemicLedger:
         self.artifacts = artifacts or {}
         self.inputs = inputs or {}
         self.hypotheses = hypotheses or {}
+        self.protocols = protocols or {}
         self.targets = targets or {}
         self.eval_suites = eval_suites or {}
         self.mutation_candidates = mutation_candidates or {}
@@ -139,6 +143,17 @@ class EpistemicLedger:
             )
             for raw in payload.get("hypotheses", [])
         }
+        protocols = {
+            raw["id"]: ProtocolDraft(
+                **{
+                    **raw,
+                    "status": ProtocolDraftStatus(
+                        raw.get("status", ProtocolDraftStatus.DRAFT.value)
+                    ),
+                }
+            )
+            for raw in payload.get("protocols", [])
+        }
         targets = {
             raw["id"]: ArtifactTarget(**raw)
             for raw in payload.get("targets", [])
@@ -192,6 +207,7 @@ class EpistemicLedger:
             artifacts=artifacts,
             inputs=inputs,
             hypotheses=hypotheses,
+            protocols=protocols,
             targets=targets,
             eval_suites=eval_suites,
             mutation_candidates=mutation_candidates,
@@ -232,6 +248,10 @@ class EpistemicLedger:
             "hypotheses": [
                 serialize_dataclass(item)
                 for item in sorted(self.hypotheses.values(), key=lambda item: item.created_at)
+            ],
+            "protocols": [
+                serialize_dataclass(item)
+                for item in sorted(self.protocols.values(), key=lambda item: item.created_at)
             ],
             "targets": [
                 serialize_dataclass(item)
@@ -288,6 +308,9 @@ class EpistemicLedger:
             "hypotheses": [
                 serialize_dataclass(item) for item in self.hypotheses_for_claim(claim_id)
             ],
+            "protocols": [
+                serialize_dataclass(item) for item in self.protocols_for_claim(claim_id)
+            ],
             "targets": [serialize_dataclass(item) for item in self.targets_for_claim(claim_id)],
             "eval_suites": [
                 serialize_dataclass(item) for item in self.eval_suites_for_claim(claim_id)
@@ -323,6 +346,8 @@ class EpistemicLedger:
                     "target_count": metrics["target_count"],
                     "input_count": metrics["input_count"],
                     "hypothesis_count": metrics["hypothesis_count"],
+                    "protocol_count": metrics["protocol_count"],
+                    "ready_protocol_count": metrics["ready_protocol_count"],
                     "eval_suite_count": metrics["eval_suite_count"],
                     "mutation_candidate_count": metrics["mutation_candidate_count"],
                     "eval_run_count": metrics["eval_run_count"],
@@ -524,6 +549,9 @@ class EpistemicLedger:
         leverage: float = 0.5,
         testability: float = 0.5,
         novelty: float = 0.5,
+        strategic_novelty: float = 0.5,
+        domain_differentiation: float = 0.5,
+        fork_specificity: float = 0.5,
         optimization_readiness: float = 0.5,
         overall_score: float = 0.0,
         status: HypothesisStatus | str = HypothesisStatus.PROPOSED,
@@ -549,6 +577,9 @@ class EpistemicLedger:
             leverage=leverage,
             testability=testability,
             novelty=novelty,
+            strategic_novelty=strategic_novelty,
+            domain_differentiation=domain_differentiation,
+            fork_specificity=fork_specificity,
             optimization_readiness=optimization_readiness,
             overall_score=overall_score,
             status=status if isinstance(status, HypothesisStatus) else HypothesisStatus(status),
@@ -558,6 +589,54 @@ class EpistemicLedger:
         self.hypotheses[hypothesis.id] = hypothesis
         self.save()
         return hypothesis
+
+    def add_protocol_draft(
+        self,
+        *,
+        input_id: str,
+        hypothesis_id: str,
+        recommended_mode: str = "",
+        status: ProtocolDraftStatus | str = ProtocolDraftStatus.DRAFT,
+        artifact_candidates: list[dict[str, Any]] | None = None,
+        target_spec: dict[str, Any] | None = None,
+        eval_plan: dict[str, Any] | None = None,
+        baseline_plan: dict[str, Any] | None = None,
+        blockers: list[str] | None = None,
+        extraction_confidence: float = 0.0,
+        eval_confidence: float = 0.0,
+        execution_readiness: float = 0.0,
+        materialized_claim_id: str = "",
+        metadata: dict[str, Any] | None = None,
+        protocol_id: str | None = None,
+    ) -> ProtocolDraft:
+        item = self.get_input(input_id)
+        hypothesis = self.get_hypothesis(hypothesis_id)
+        if hypothesis.input_id != item.id:
+            raise ValueError("Protocol input_id and hypothesis.input_id must match.")
+        protocol = ProtocolDraft(
+            id=protocol_id or self._generate_id("proto"),
+            input_id=input_id,
+            hypothesis_id=hypothesis_id,
+            recommended_mode=recommended_mode,
+            status=(
+                status
+                if isinstance(status, ProtocolDraftStatus)
+                else ProtocolDraftStatus(status)
+            ),
+            artifact_candidates=artifact_candidates or [],
+            target_spec=target_spec or {},
+            eval_plan=eval_plan or {},
+            baseline_plan=baseline_plan or {},
+            blockers=blockers or [],
+            extraction_confidence=extraction_confidence,
+            eval_confidence=eval_confidence,
+            execution_readiness=execution_readiness,
+            materialized_claim_id=materialized_claim_id,
+            metadata=metadata or {},
+        )
+        self.protocols[protocol.id] = protocol
+        self.save()
+        return protocol
 
     def register_target(
         self,
@@ -810,6 +889,13 @@ class EpistemicLedger:
             if hypothesis_id in self.hypotheses
         ]
 
+    def protocols_for_claim(self, claim_id: str) -> list[ProtocolDraft]:
+        return [
+            self.protocols[protocol_id]
+            for protocol_id in self.get_claim(claim_id).protocol_ids
+            if protocol_id in self.protocols
+        ]
+
     def targets_for_claim(self, claim_id: str) -> list[ArtifactTarget]:
         return [
             self.targets[target_id]
@@ -859,6 +945,20 @@ class EpistemicLedger:
             key=lambda item: item.created_at,
         )
 
+    def protocols_for_input(self, input_id: str) -> list[ProtocolDraft]:
+        self.get_input(input_id)
+        return sorted(
+            [item for item in self.protocols.values() if item.input_id == input_id],
+            key=lambda item: item.created_at,
+        )
+
+    def protocols_for_hypothesis(self, hypothesis_id: str) -> list[ProtocolDraft]:
+        self.get_hypothesis(hypothesis_id)
+        return sorted(
+            [item for item in self.protocols.values() if item.hypothesis_id == hypothesis_id],
+            key=lambda item: item.created_at,
+        )
+
     def get_claim(self, claim_id: str) -> Claim:
         try:
             return self.claims[claim_id]
@@ -876,6 +976,12 @@ class EpistemicLedger:
             return self.hypotheses[hypothesis_id]
         except KeyError as exc:
             raise KeyError(f"Unknown hypothesis id: {hypothesis_id}") from exc
+
+    def get_protocol(self, protocol_id: str) -> ProtocolDraft:
+        try:
+            return self.protocols[protocol_id]
+        except KeyError as exc:
+            raise KeyError(f"Unknown protocol id: {protocol_id}") from exc
 
     def get_decision(self, decision_id: str) -> DecisionRecord:
         try:
@@ -912,6 +1018,9 @@ class EpistemicLedger:
 
     def list_hypotheses(self) -> list[InnovationHypothesis]:
         return sorted(self.hypotheses.values(), key=lambda item: item.created_at)
+
+    def list_protocols(self) -> list[ProtocolDraft]:
+        return sorted(self.protocols.values(), key=lambda item: item.created_at)
 
     def record_decision(
         self,
@@ -1020,6 +1129,23 @@ class EpistemicLedger:
         self.save()
         return item
 
+    def link_protocol_to_claim(
+        self,
+        *,
+        protocol_id: str,
+        claim_id: str,
+        status: ProtocolDraftStatus | str = ProtocolDraftStatus.MATERIALIZED,
+    ) -> ProtocolDraft:
+        protocol = self.get_protocol(protocol_id)
+        self.get_claim(claim_id)
+        protocol.materialized_claim_id = claim_id
+        protocol.status = (
+            status if isinstance(status, ProtocolDraftStatus) else ProtocolDraftStatus(status)
+        )
+        protocol.updated_at = utc_now()
+        self.save()
+        return protocol
+
     def refresh_all(self) -> None:
         self._rebuild_indexes()
         for claim_id in self.claims:
@@ -1043,6 +1169,7 @@ class EpistemicLedger:
         artifacts = self.artifacts_for_claim(claim_id)
         inputs = self.inputs_for_claim(claim_id)
         hypotheses = self.hypotheses_for_claim(claim_id)
+        protocols = self.protocols_for_claim(claim_id)
         targets = self.targets_for_claim(claim_id)
         eval_suites = self.eval_suites_for_claim(claim_id)
         mutation_candidates = self.mutation_candidates_for_claim(claim_id)
@@ -1198,6 +1325,14 @@ class EpistemicLedger:
             "artifact_count": len(artifacts),
             "input_count": len(inputs),
             "hypothesis_count": len(hypotheses),
+            "protocol_count": len(protocols),
+            "ready_protocol_count": len(
+                [
+                    item
+                    for item in protocols
+                    if item.status in {ProtocolDraftStatus.READY, ProtocolDraftStatus.MATERIALIZED}
+                ]
+            ),
             "method_artifact_count": method_artifact_count,
             "paper_artifact_count": paper_artifact_count,
             "target_count": len(targets),
@@ -1295,6 +1430,7 @@ class EpistemicLedger:
             claim.artifact_ids = []
             claim.input_ids = []
             claim.hypothesis_ids = []
+            claim.protocol_ids = []
             claim.target_ids = []
             claim.eval_suite_ids = []
             claim.mutation_candidate_ids = []
@@ -1326,6 +1462,10 @@ class EpistemicLedger:
         for hypothesis in self.hypotheses.values():
             if hypothesis.materialized_claim_id in self.claims:
                 self.claims[hypothesis.materialized_claim_id].hypothesis_ids.append(hypothesis.id)
+
+        for protocol in self.protocols.values():
+            if protocol.materialized_claim_id in self.claims:
+                self.claims[protocol.materialized_claim_id].protocol_ids.append(protocol.id)
 
         for target in self.targets.values():
             if target.claim_id in self.claims:
