@@ -1,548 +1,198 @@
 # AIEQ-Core
 
-[![CI](https://github.com/jmanhype/AIEQ-Core/actions/workflows/ci.yml/badge.svg)](https://github.com/jmanhype/AIEQ-Core/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/jmanhype/AIEQ-Core/blob/main/LICENSE)
-[![Python 3.10%2B](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://github.com/jmanhype/AIEQ-Core/blob/main/pyproject.toml)
+Epistemic ledger and controller for automated research agents. Tracks claims, assumptions, evidence, and attacks as a persistent belief graph. Ranks next actions by expected information gain. Orchestrates external systems (Denario for idea/method/paper generation, autoresearch for GPU experiments) without absorbing them into one monolith.
 
-AIEQ-Core is the orchestration and memory layer for an automated **innovation
-engine**. It can generate hypotheses, mutate artifacts, run evals, retain
-winners, critique conclusions, and compound knowledge over time.
+The name stands for Axiomatic Inversion and Epistemic Quarantine:
+- **Axiomatic inversion**: perturb common assumptions to surface hypotheses that ordinary loops would skip.
+- **Epistemic quarantine**: reduce the influence of dominant papers and consensus so the system explores neglected directions.
 
-Today the repo ships in two layers:
+## Status
 
-- a **generic innovation kernel**
-- built-in **modes** on top of that kernel
+v0.1.0. The ledger (schema version 7), controller, policy engine, 2 adapters, 3 modes, intake layer, and CLI are implemented. 10 test files cover the core modules. The repo has 0 runtime Python dependencies -- it uses only the standard library. External system integration (Denario, autoresearch) requires those tools to be installed separately.
 
-The current built-in modes are:
+## Repository layout
 
-- `ml_research`
-  - the existing Denario + `autoresearch` scientific/ML lab
-- `skill_optimizer`
-  - prompt and `SKILL.md`-style optimization against explicit eval suites
+```
+76 files total
 
-On top of those modes, the repo now has an **intake layer** for arbitrary input:
+src/aieq_core/
+  models.py           -- 20 dataclasses, 11 enums (claims, evidence, attacks, artifacts, etc.)
+  ledger.py           -- JSON-backed persistent belief graph, schema v7
+  policy.py           -- action ranking by expected information gain
+  controller.py       -- chooses next action across modes, tracks decision/execution history
+  orchestrator.py     -- guarded execution layer, routes through active mode adapter
+  runtime.py          -- config, provider-key detection, capability diagnostics
+  intake.py           -- registers inputs, generates hypotheses, compiles protocols
+  cli.py              -- CLI for all ledger and orchestration operations
+  method_bridge.py    -- rewrites train.py for autoresearch runs via LLM
+  _denario_task.py    -- Denario task wrapper
+  adapters/
+    autoresearch.py   -- parses run logs and results.tsv into ledger evidence
+    denario.py        -- imports Denario project dirs into claims, evidence, attacks, artifacts
+  modes/
+    base.py           -- mode interface
+    ml_research.py    -- Denario + autoresearch scientific/ML lab mode
+    skill_optimizer.py -- prompt/SKILL.md optimization against eval suites
+    repo_benchmark.py -- (stub)
 
-- register a repo, document, prompt, or inline text as an input artifact
-- generate ranked feature or optimization hypotheses from that input
-- compile the best hypothesis into a grounded protocol draft
-- materialize that protocol into a real claim and, when possible, a real target plus eval suite
+tests/                -- 10 test files
+  test_ledger.py
+  test_controller.py
+  test_orchestrator.py
+  test_intake.py
+  test_runtime.py
+  test_method_bridge.py
+  test_autoresearch_adapter.py
+  test_denario_adapter.py
+  test_cli_modes.py
+  test_demo_script.py
 
-The name comes from **Axiomatic Inversion & Epistemic Quarantine**:
+examples/
+  demo/
+    run_demo.py       -- end-to-end demo against fixture data
+    fixtures/         -- autoresearch logs, Denario project files
+  skill_optimizer/
+    support-skill.md  -- sample prompt target
+    eval-suite.json   -- sample eval suite
 
-- **Axiomatic inversion**: deliberately perturb or invert common assumptions to
-  surface hypotheses that ordinary research loops would not propose.
-- **Epistemic quarantine**: temporarily reduce the influence of dominant papers,
-  citations, or consensus narratives so the system is forced to explore
-  neglected directions.
+docs/architecture.md
+.github/workflows/ci.yml
+```
 
-## Core idea
+## Core concepts
 
-The most important addition in this repository is the **epistemic ledger**.
+The ledger stores 14 entity types:
 
-Instead of treating research as a one-shot prompt chain, AIEQ-Core treats it as
-a persistent belief graph:
-
-- claims are the units of novelty
-- assumptions are the hidden load-bearing beams
-- evidence moves belief up or down
-- attacks act as explicit falsifiers
-- the controller ranks what to do next by expected information gain
-
-That is the piece that makes the system compounding rather than stateless.
-
-## Project intent
-
-The broader concept is a hybrid innovation engine:
-
-1. **Brain**: generate hypotheses using AIEQ-style inversion and quarantine
-   rules.
-2. **Hands**: mutate the thing being improved and evaluate it against explicit
-   metrics or test suites.
-3. **Mouth**: synthesize validated results into structured artifacts or
-   reports.
-4. **Critic**: attack the hypothesis, mutation, or conclusions before a human
-   reviews it.
-
-In other words, this repository is not meant to be just another auto-research
-loop. It is intended to be the coordination core for an iterative system that
-explicitly searches for ideas outside the current local optimum and then tests
-them.
+| Entity | Purpose |
+|--------|---------|
+| Claim | A falsifiable hypothesis to investigate |
+| Assumption | Hidden load-bearing belief behind a claim |
+| Evidence | Observation that moves belief up or down |
+| Attack | Explicit falsification attempt |
+| Artifact | Method or paper produced by Denario |
+| ArtifactTarget | Mutable artifact registered for optimization |
+| InputArtifact | Arbitrary input (repo, document, prompt, text) |
+| InnovationHypothesis | Ranked hypothesis generated from an input |
+| ProtocolDraft | Grounded protocol compiled from a hypothesis |
+| EvalSuite | Test cases and scoring for optimization |
+| MutationCandidate | Modified artifact under review |
+| EvalRun | Single evaluation of a candidate against a case |
+| DecisionRecord | Recorded controller decision |
+| ExecutionRecord | Outcome of an executed decision |
 
 ## Modes
 
-### `ml_research`
+| Mode | Adapters | What it does |
+|------|----------|-------------|
+| ml_research | Denario, autoresearch | Generate ideas and methods via Denario, run GPU experiments via autoresearch, import results back into the ledger |
+| skill_optimizer | (built-in) | Mutate a prompt or SKILL.md artifact, run eval suites, promote winners |
+| repo_benchmark | (stub) | Not yet implemented |
 
-- Denario generates ideas, methods, critique, and paper artifacts
-- `autoresearch` runs bounded GPU experiments
-- the method bridge rewrites `train.py` for one guarded run at a time
+## Controller behavior
 
-### `skill_optimizer`
+The controller reads the full ledger state -- claims, evidence, attacks, execution history, and experiment series -- then ranks actions by expected information gain. It penalizes:
+- Repeated failed actions
+- Expensive dead ends (using recorded cost and runtime)
+- Long experiment stagnation (using autoresearch series rollups)
+- Already-completed one-shot stages
 
-- the target is a prompt or `SKILL.md`-like artifact
-- an LLM mutates the artifact under invariant constraints
-- the candidate is reviewed before evaluation
-- repeated eval cases score the candidate across a distribution of runs
-- the best candidate can be promoted without overwriting the original source by default
+When a Denario method artifact exists, the execution plane can bridge it into a concrete `train.py` rewrite, review the draft, and retry once on failure.
 
-## What exists now
+## CLI
 
-The repo now contains both the reusable kernel and the first mode split:
+All operations go through `python -m aieq_core.cli`. Key subcommands:
 
-- `src/aieq_core/models.py`
-  - typed schema for claims, assumptions, evidence, attacks, artifacts, ranked actions, and generic optimization entities such as targets, eval suites, mutation candidates, and eval runs
-- `src/aieq_core/ledger.py`
-  - persistent JSON ledger with derived belief/status updates
-  - now includes first-class inputs, innovation hypotheses, protocol drafts, optimization targets, mutation candidates, eval suites, eval runs, and existing method/paper artifacts
-- `src/aieq_core/intake.py`
-  - Denario-style intake layer that turns arbitrary input into ranked, testable hypotheses, compiles grounded protocol drafts, and can materialize those protocols into real claims and targets
-- `src/aieq_core/policy.py`
-  - action ranking based on expected information gain
-- `src/aieq_core/modes/`
-  - pluggable mode layer for `ml_research` and `skill_optimizer`
-- `src/aieq_core/adapters/autoresearch.py`
-  - adapter that parses `autoresearch` run logs and aggregate `results.tsv` histories into ledger evidence plus controller-facing series metrics
-- `src/aieq_core/adapters/denario.py`
-  - adapter that imports Denario project directories into claims, evidence, attacks, method artifacts, and paper artifacts
-- `src/aieq_core/controller.py`
-  - controller that chooses between mode-specific next actions while keeping shared decision/execution history
-- `src/aieq_core/runtime.py`
-  - unified runtime config, provider-key detection, and capability diagnostics
-- `src/aieq_core/orchestrator.py`
-  - guarded execution layer that routes through the active mode adapter
-- `src/aieq_core/cli.py`
-  - CLI for ledger operations, mode-aware diagnostics, target/eval registration, and single-entrypoint execution
-- `docs/architecture.md`
-  - architectural rationale and integration boundaries
-- `external/autoresearch`
-  - cloned upstream experiment engine
-- `external/denario`
-  - cloned upstream research/paper pipeline
+| Subcommand | Purpose |
+|------------|---------|
+| init | Create an empty ledger |
+| add-claim | Register a new hypothesis |
+| add-assumption | Attach an assumption to a claim |
+| add-evidence | Record an observation |
+| show | Print ledger summary |
+| rank-actions | List next actions by information gain |
+| decide-next | Controller picks and optionally records a decision |
+| run-next | Execute one step via the appropriate adapter |
+| run-loop | Execute N iterations of decide+run |
+| import-autoresearch-run | Import a single experiment run log |
+| import-autoresearch-results | Import aggregate results.tsv series |
+| import-denario-project | Import a Denario project directory |
+| ingest register | Register arbitrary input for hypothesis generation |
+| generate-hypotheses | Generate ranked hypotheses from an input |
+| compile-protocol | Compile a hypothesis into a protocol draft |
+| materialize-protocol | Turn a protocol into a real claim and target |
+| target register | Register an optimization target |
+| eval register | Register an eval suite |
+| promote-winner | Promote the best evaluated candidate |
+| doctor | Check runtime readiness (local or remote) |
+| mode list | List registered modes |
 
-## Demo
+## External systems
 
-Run the checked-in end-to-end demo:
+AIEQ-Core does not bundle Denario or autoresearch. It calls them in their own repos and environments:
 
-```bash
-python examples/demo/run_demo.py
-```
+- **Denario**: multi-agent idea/method/results/paper pipeline. AIEQ-Core imports its output directories.
+- **autoresearch**: single-file experiment engine. AIEQ-Core launches it (locally or via SSH on a remote GPU box) and imports run logs.
 
-That script exercises the real CLI against fixture data in
-[`examples/demo/fixtures`](/Users/speed/AIEQ-Core/examples/demo/fixtures) and
-writes JSON outputs into
-[`examples/demo/output`](/Users/speed/AIEQ-Core/examples/demo/output). The demo
-intentionally sets up a contested claim, imports two `autoresearch` branches,
-records the controller's `run_experiment` decision, closes it with a follow-up
-run import, and ends with a fresh controller decision. The detailed walkthrough
-is in [`examples/demo/README.md`](/Users/speed/AIEQ-Core/examples/demo/README.md).
-
-## Single entrypoint
-
-`AIEQ-Core` can now act as the command surface for the supported external
-systems and optimization modes instead of only telling you what to run next.
-
-List the registered modes:
+## Setup
 
 ```bash
-PYTHONPATH=src python -m aieq_core.cli mode list
+git clone https://github.com/jmanhype/AIEQ-Core.git
+cd AIEQ-Core
+cp .env.example .env          # set API keys and paths
+pip install -e .              # zero runtime dependencies
 ```
 
-The current execution plane automates:
-
-- `generate_idea` via Denario
-- `generate_method` via Denario
-- `synthesize_paper` via Denario
-- `run_experiment` and `reproduce_result` via `autoresearch`
-- `generate_hypotheses` via the intake layer
-- `compile_protocol` via the intake layer
-- `design_mutation`, `run_eval`, `analyze_failure`, and `promote_winner` for `skill_optimizer`
-
-It does this without collapsing the upstream repos into one monolith:
-
-- Denario still runs in its own repo and Python environment
-- `autoresearch` still runs in its own repo and Python environment
-- AIEQ-Core remains the ledger, controller, and execution orchestrator
-
-`autoresearch` can also run on a remote SSH worker when the local machine is not
-the right place to do GPU work. The current remote path assumes a POSIX host
-with:
-
-- SSH access
-- `uv`
-- Python 3.10+
-- NVIDIA runtime
-- an `autoresearch` checkout on the remote host
-- `~/.cache/autoresearch` already prepared on that host
-
-Copy the runtime template and set the keys or paths you actually need:
-
-```bash
-cp .env.example .env
-```
-
-Inspect readiness from this repo:
+Verify readiness:
 
 ```bash
 PYTHONPATH=src python -m aieq_core.cli doctor
 ```
 
-Inspect readiness for one mode only:
+Run the demo:
 
 ```bash
-PYTHONPATH=src python -m aieq_core.cli doctor --mode skill_optimizer
+python examples/demo/run_demo.py
 ```
 
-If you already have a ledger, you can ask whether the current next action is
-actually runnable on this machine:
+Run tests:
 
 ```bash
-PYTHONPATH=src python -m aieq_core.cli doctor --ledger data/ledger.json
+python -m unittest discover -s tests -v
 ```
 
-Then let AIEQ-Core decide and execute one supported step:
+## Configuration
 
-```bash
-PYTHONPATH=src python -m aieq_core.cli run-next data/ledger.json \
-  --mode ml_research \
-  --data-description-file /absolute/path/to/data_description.md
-```
+Set in `.env`:
 
-That command will:
+| Variable | Purpose |
+|----------|---------|
+| AIEQ_AUTORESEARCH_REMOTE_HOST | SSH host for remote GPU experiments |
+| AIEQ_AUTORESEARCH_REMOTE_REPO | Path to autoresearch on the remote host |
+| AIEQ_METHOD_BRIDGE_ENABLED | Enable LLM-based train.py rewriting |
+| AIEQ_METHOD_BRIDGE_MODEL | Model for method bridge (e.g., gpt-4.1) |
 
-- read the ledger
-- record the controller decision
-- launch the external system in its own environment
-- import the resulting artifacts back into the ledger
-- emit the follow-up controller decision
+## Design decisions
 
-For `autoresearch`, the runner also writes a branch-local `results.tsv` under
-`.aieq-runtime/` and re-imports that series so the controller sees aggregate
-momentum, crash rate, and stagnation after each automated run.
-If the target claim already has a Denario method artifact, `run-next` now uses
-an OpenAI-backed bridge to rewrite `train.py` for that single run, validates
-that the generated file still preserves the local `autoresearch` run-log
-contract, asks a second model pass to review the candidate before launch, and
-stores the prompt/response/generated file under
-`.aieq-runtime/executions/<decision-id>/`. If the first bridged run still
-crashes, the execution plane captures the runtime error, requests one repaired
-bridge draft, and retries once before restoring the worker's original
-`train.py`.
+**Zero runtime dependencies**: The core uses only Python stdlib. This keeps the ledger and controller portable. External adapters shell out to Denario and autoresearch in their own environments.
 
-### Remote `autoresearch`
+**JSON-backed ledger**: The ledger is a single JSON file. This is simple to inspect, diff, and version-control. It will not scale to millions of entities, but research workflows rarely produce that volume.
 
-If you want the experiment runner to execute on a remote GPU box instead of the
-local machine, set:
+**Controller penalizes, does not forbid**: Failed or expensive actions get lower priority, but the controller can still recommend them if the information gain is high enough. This prevents premature pruning of promising but difficult directions.
 
-```bash
-AIEQ_AUTORESEARCH_REMOTE_HOST=3090
-AIEQ_AUTORESEARCH_REMOTE_REPO=/absolute/remote/path/to/autoresearch
-AIEQ_METHOD_BRIDGE_ENABLED=1
-AIEQ_METHOD_BRIDGE_MODEL=gpt-4.1
-```
+**Adapters import, not embed**: Denario and autoresearch keep their own repos and runtimes. AIEQ-Core only reads their output artifacts. This avoids version coupling and lets each tool evolve independently.
 
-After that, `doctor` will probe the remote worker instead of the local machine
-for:
+**Intake can block**: The intake layer is allowed to produce a "blocked" protocol if the input is too abstract to optimize. This is intentional -- it signals that a human needs to extract the concrete artifact before automation can proceed.
 
-- SSH reachability
-- Python
-- `uv`
-- NVIDIA runtime
-- remote repo presence
-- remote `~/.cache/autoresearch`
+## Limitations
 
-And `run-next` will execute `autoresearch` over SSH while still importing the
-run log and series rollup back into the local ledger.
+- No web UI; all interaction is via CLI
+- Ledger is a single JSON file, not a database
+- `repo_benchmark` mode is a stub
+- Remote autoresearch requires manual SSH key setup and a pre-configured host
+- Method bridge depends on OpenAI API access
+- No multi-user or concurrent access support for the ledger file
+- Branch-level exploration comparison is per-branch rollup only; no direct cross-branch efficiency analysis yet
 
-### Skill optimizer quick start
+## License
 
-Register a prompt-like target:
-
-```bash
-PYTHONPATH=src python -m aieq_core.cli target register data/ledger.json \
-  --mode skill_optimizer \
-  --title "Support reply skill" \
-  --source-file examples/skill_optimizer/support-skill.md
-```
-
-Register an eval suite from JSON:
-
-```bash
-PYTHONPATH=src python -m aieq_core.cli eval register data/ledger.json \
-  --mode skill_optimizer \
-  --claim-id <claim-id> \
-  --target-id <target-id> \
-  --suite-file examples/skill_optimizer/eval-suite.json
-```
-
-Then run the loop:
-
-```bash
-PYTHONPATH=src python -m aieq_core.cli run-loop data/ledger.json \
-  --mode skill_optimizer \
-  --iterations 3
-```
-
-### Intake quick start
-
-Register arbitrary input:
-
-```bash
-PYTHONPATH=src python -m aieq_core.cli ingest register data/ledger.json \
-  --title "OpenSquirrel repo" \
-  --source-path /absolute/path/to/OpenSquirrel
-```
-
-Generate and rank hypotheses from that input:
-
-```bash
-PYTHONPATH=src python -m aieq_core.cli generate-hypotheses data/ledger.json \
-  --input-id <input-id> \
-  --count 5
-```
-
-Compile the best hypothesis into a grounded protocol draft:
-
-```bash
-PYTHONPATH=src python -m aieq_core.cli compile-protocol data/ledger.json \
-  --hypothesis-id <hypothesis-id>
-```
-
-Inspect that protocol:
-
-```bash
-PYTHONPATH=src python -m aieq_core.cli protocol show data/ledger.json \
-  --protocol-id <protocol-id>
-```
-
-Materialize the protocol into a real claim and, when possible, a
-`skill_optimizer` target plus compiled eval suite:
-
-```bash
-PYTHONPATH=src python -m aieq_core.cli materialize-protocol data/ledger.json \
-  --protocol-id <protocol-id>
-```
-
-For repo-shaped or vague inputs, compilation may stop at a blocked protocol or
-at a claim-only path if the artifact is still too abstract. That is
-intentional: the intake layer is allowed to say “this idea is promising, but
-you still need to extract the artifact before optimization can begin.”
-
-Or promote the current best evaluated candidate:
-
-```bash
-PYTHONPATH=src python -m aieq_core.cli promote-winner data/ledger.json \
-  --claim-id <claim-id>
-```
-
-## Quick start
-
-Create an empty ledger:
-
-```bash
-PYTHONPATH=src python -m aieq_core.cli init data/ledger.json
-```
-
-Add a claim and some supporting structure:
-
-```bash
-PYTHONPATH=src python -m aieq_core.cli add-claim data/ledger.json \
-  --title "Sparse attention improves short-budget pretraining" \
-  --statement "A sparse attention variant should reduce validation bpb." \
-  --novelty 0.8 \
-  --falsifiability 0.9
-
-PYTHONPATH=src python -m aieq_core.cli add-assumption data/ledger.json \
-  --claim-id <claim-id> \
-  --text "The sparse kernel does not destabilize training." \
-  --risk 0.7
-
-PYTHONPATH=src python -m aieq_core.cli add-evidence data/ledger.json \
-  --claim-id <claim-id> \
-  --summary "First run improved validation bpb by 0.003." \
-  --direction support \
-  --strength 0.8 \
-  --confidence 0.9 \
-  --source-type autoresearch \
-  --source-ref commit:abc1234
-```
-
-Inspect the ledger and rank next actions:
-
-```bash
-PYTHONPATH=src python -m aieq_core.cli show data/ledger.json
-PYTHONPATH=src python -m aieq_core.cli rank-actions data/ledger.json --limit 5
-```
-
-Import a real `autoresearch` run:
-
-```bash
-PYTHONPATH=src python -m aieq_core.cli import-autoresearch-run data/ledger.json \
-  --claim-id <claim-id> \
-  --run-log /path/to/run.log \
-  --commit abc1234 \
-  --description "Sparse attention pilot" \
-  --status keep \
-  --baseline-bpb 1.000500
-```
-
-If that run came from a recorded controller decision, thread the id through the
-import and let the adapter auto-record the execution outcome:
-
-```bash
-PYTHONPATH=src python -m aieq_core.cli import-autoresearch-run data/ledger.json \
-  --claim-id <claim-id> \
-  --decision-id <decision-id> \
-  --run-log /path/to/run.log \
-  --status keep \
-  --cost-usd 0.42
-```
-
-Import an aggregate `autoresearch` history so the controller can reason over
-the whole experiment series instead of one run at a time:
-
-```bash
-PYTHONPATH=src python -m aieq_core.cli import-autoresearch-results data/ledger.json \
-  --claim-id <claim-id> \
-  --results-tsv /path/to/results.tsv \
-  --branch main
-```
-
-That series import stores a branch-specific rollup and updates the claim-wide
-aggregate view. You can import more than one branch for the same claim:
-
-```bash
-PYTHONPATH=src python -m aieq_core.cli import-autoresearch-results data/ledger.json \
-  --claim-id <claim-id> \
-  --results-tsv /path/to/radical-results.tsv \
-  --branch radical
-```
-
-The adapter keeps per-branch summaries and also chooses one preferred branch to
-drive controller hints and scoring. The stored rollups include:
-
-- run count
-- keep rate
-- crash rate
-- frontier improvements
-- stagnation since the last real improvement
-- best `val_bpb` delta against the baseline
-- active branch count
-- plateau branch count
-
-Import a Denario project directory:
-
-```bash
-PYTHONPATH=src python -m aieq_core.cli import-denario-project data/ledger.json \
-  --project-dir /path/to/denario/project \
-  --results-direction support \
-  --novelty 0.75 \
-  --falsifiability 0.60
-```
-
-That import now materializes:
-
-- one claim
-- one results evidence record when `results.md` exists
-- one method artifact when `methods.md` exists
-- one paper artifact per file in `paper/`
-- literature and referee attacks when those files exist
-
-For a recorded `generate_idea`, `generate_method`, or `synthesize_paper`
-decision, pass the decision id here and the adapter will attach the resulting
-claim/evidence/attacks to the execution record automatically:
-
-```bash
-PYTHONPATH=src python -m aieq_core.cli import-denario-project data/ledger.json \
-  --project-dir /path/to/denario/project \
-  --decision-id <decision-id> \
-  --results-direction support \
-  --runtime-seconds 480 \
-  --cost-usd 1.75
-```
-
-Ask the controller for the next move:
-
-```bash
-PYTHONPATH=src python -m aieq_core.cli decide-next data/ledger.json --backlog-limit 5
-```
-
-Persist the controller decision and then record the outcome:
-
-```bash
-PYTHONPATH=src python -m aieq_core.cli decide-next data/ledger.json --record
-
-PYTHONPATH=src python -m aieq_core.cli record-execution data/ledger.json \
-  --decision-id <decision-id> \
-  --status succeeded \
-  --notes "Imported the new run and updated the claim."
-```
-
-The controller now reads this execution history and discounts repeated failed or
-already-completed one-shot stages instead of recommending them forever.
-It also reads runtime, cost, and inferred artifact quality, so expensive dead
-ends are penalized more aggressively than cheap exploratory misses.
-If an `autoresearch` results series is present, it also reads that aggregate
-history so long stagnation or crash-heavy trajectories push work toward
-assumption-challenge and critique instead of blind re-runs. When more than one
-branch history is imported, the controller uses the preferred branch for direct
-experiment hints while still considering cross-branch breadth and plateau
-signals.
-It also reads first-class Denario method and paper artifacts, so methodology and
-paper presence no longer depend on ad hoc claim metadata alone. When a method
-artifact exists, the execution plane can now bridge that method into a concrete
-`train.py` rewrite before launching `autoresearch`, review that draft before it
-touches the worker, and keep per-attempt bridge artifacts plus runtime-repair
-history in the execution record.
-
-If you want the controller to only recommend without executing, keep using:
-
-```bash
-PYTHONPATH=src python -m aieq_core.cli decide-next data/ledger.json
-```
-
-If you want the repo to actually execute the next supported step from the same
-entrypoint, use:
-
-```bash
-PYTHONPATH=src python -m aieq_core.cli run-next data/ledger.json
-```
-
-## External systems
-
-Two upstream repos are cloned locally for integration work:
-
-- [`external/autoresearch`](/Users/speed/AIEQ-Core/external/autoresearch)
-  - single-file experiment engine centered on `train.py`
-- [`external/denario`](/Users/speed/AIEQ-Core/external/denario)
-  - multi-agent idea, method, results, and paper pipeline
-
-The intended shape is to keep AIEQ-Core above them as the controller and memory
-layer, rather than merging their internals into one monolith.
-
-## Status
-
-This repo is still early, but the ledger core, controller, and first two
-integration adapters are in place.
-
-## Contributing
-
-Contribution guidance lives in [`CONTRIBUTING.md`](/Users/speed/AIEQ-Core/CONTRIBUTING.md).
-
-If you want to help quickly:
-
-- run the test suite with `python -m unittest discover -s tests -v`
-- run the demo with `python examples/demo/run_demo.py`
-- open a bug report, feature request, or research proposal from the GitHub issue templates
-
-## Near-term build goals
-
-1. Compare branch-level exploration efficiency directly instead of only picking a preferred branch.
-2. Expand the artifact graph beyond methods and papers to include plots, datasets, and reviews.
-3. Add richer execution metadata so the controller can learn from crash
-   signatures and artifact quality in addition to runtime and cost.
-
-## Immediate next steps
-
-- Compare exploration efficiency across autoresearch branches explicitly
-- Add branch-aware reports or dashboards on top of the ledger summaries
-- Expand first-class artifacts beyond Denario methods and papers
-- Create the initial commit
+MIT.
